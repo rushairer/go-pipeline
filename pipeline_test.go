@@ -21,10 +21,13 @@ func BenchmarkTestPipeline(b *testing.B) {
 
 	defer cancel()
 
-	pipeline := gopipeline.NewPipeline[int](
-		500000,
-		time.Second*2,
-		func(ctx context.Context, batchData []int) error {
+	pipeline := gopipeline.NewPipeline[[]string](
+		gopipeline.PipelineConfig{
+			FlushSize:     500000,
+			FlushInterval: time.Second * 2,
+			BufferSize:    100000,
+		},
+		func(ctx context.Context, batchData [][]string) error {
 			log.Println("batchData len:", len(batchData))
 			return nil
 		})
@@ -36,7 +39,7 @@ func BenchmarkTestPipeline(b *testing.B) {
 	}()
 
 	for i := 0; i < math.MaxInt64; i++ {
-		if err := pipeline.Add(ctx, i); err != nil {
+		if err := pipeline.Add(ctx, make([]string, 100)); err != nil {
 			log.Println(err)
 			break
 		}

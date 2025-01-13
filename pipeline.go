@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -21,46 +22,46 @@ type FlushFunc[T any] func(ctx context.Context, batchData []T) error
 
 const (
 	defaultFlushSize     = 10000
+	defaultBufferSize    = 1000
 	defaultFlushInterval = time.Second * 60
 )
 
 type Pipeline[T any] struct {
-	flushSize     uint32
-	flushInterval time.Duration
-	flushFunc     FlushFunc[T]
+	config    PipelineConfig
+	flushFunc FlushFunc[T]
 
 	dataChan chan T
+}
+
+type PipelineConfig struct {
+	FlushSize     uint32
+	BufferSize    uint32
+	FlushInterval time.Duration
 }
 
 func NewDefaultPipeline[T any](
 	flushFunc FlushFunc[T],
 ) *Pipeline[T] {
 	return &Pipeline[T]{
-		flushSize:     defaultFlushSize,
-		flushInterval: defaultFlushInterval,
-		flushFunc:     flushFunc,
-		dataChan:      make(chan T),
+		config: PipelineConfig{
+			FlushSize:     defaultFlushSize,
+			BufferSize:    defaultBufferSize,
+			FlushInterval: defaultFlushInterval,
+		},
+		flushFunc: flushFunc,
+		dataChan:  make(chan T, defaultBufferSize),
 	}
 }
 
 func NewPipeline[T any](
-	flushSize uint32,
-	flushInterval time.Duration,
+	config PipelineConfig,
 	flushFunc FlushFunc[T],
 ) *Pipeline[T] {
-	if flushSize == 0 {
-		flushSize = defaultFlushSize
-	}
-
-	if flushInterval == 0 {
-		flushInterval = defaultFlushInterval
-	}
 
 	return &Pipeline[T]{
-		flushSize:     flushSize,
-		flushInterval: flushInterval,
-		flushFunc:     flushFunc,
-		dataChan:      make(chan T),
+		config:    config,
+		flushFunc: flushFunc,
+		dataChan:  make(chan T, config.BufferSize),
 	}
 }
 
@@ -89,9 +90,16 @@ func (p *Pipeline[T]) Run(
 ) (
 	err error,
 ) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println(r)
+		}
+	}()
+
 	defer close(p.dataChan)
 
-	ticker := time.NewTicker(p.flushInterval)
+	ticker := time.NewTicker(p.config.FlushInterval)
+	defer ticker.Stop()
 
 	batchData := []T{}
 
@@ -99,11 +107,9 @@ func (p *Pipeline[T]) Run(
 		select {
 		case event := <-p.dataChan:
 			batchData = append(batchData, event)
-
-			if len(batchData) < int(p.flushSize) {
+			if len(batchData) < int(p.config.FlushSize) {
 				continue
 			}
-
 			p.flushFunc(ctx, batchData)
 
 			batchData = batchData[:0]
@@ -111,11 +117,9 @@ func (p *Pipeline[T]) Run(
 			if len(batchData) < 1 {
 				continue
 			}
-
 			p.flushFunc(ctx, batchData)
 
 			batchData = batchData[:0]
-
 		case <-ctx.Done():
 			return ErrContextIsClosed
 		}
