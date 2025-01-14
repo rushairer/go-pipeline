@@ -110,14 +110,14 @@ func (p *Pipeline[T]) Run(
 			if len(batchData) < int(p.config.FlushSize) {
 				continue
 			}
-			p.flushFunc(ctx, batchData)
+			go p.flushFunc(ctx, batchData)
 
 			batchData = batchData[:0]
 		case <-ticker.C:
 			if len(batchData) < 1 {
 				continue
 			}
-			p.flushFunc(ctx, batchData)
+			go p.flushFunc(ctx, batchData)
 
 			batchData = batchData[:0]
 		case <-ctx.Done():
