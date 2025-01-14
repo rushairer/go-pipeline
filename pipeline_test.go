@@ -21,11 +21,13 @@ func BenchmarkTestPipeline(b *testing.B) {
 
 	defer cancel()
 
+	flushSize := 100000
+
 	pipeline := gopipeline.NewPipeline[[]string](
 		gopipeline.PipelineConfig{
-			FlushSize:     500000,
+			FlushSize:     uint32(flushSize),
 			FlushInterval: time.Second * 2,
-			BufferSize:    100000,
+			BufferSize:    uint32(flushSize),
 		},
 		func(ctx context.Context, batchData [][]string) error {
 			log.Println("batchData len:", len(batchData))

@@ -21,8 +21,8 @@ type FlushFunc[T any] func(ctx context.Context, batchData []T) error
 // pipeline
 
 const (
-	defaultFlushSize     = 10000
-	defaultBufferSize    = 1000
+	defaultFlushSize     = 100000
+	defaultBufferSize    = 100000
 	defaultFlushInterval = time.Second * 60
 )
 
