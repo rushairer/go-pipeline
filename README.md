@@ -12,25 +12,25 @@ A high-performance, configurable Go data processing pipeline library with suppor
 
 ## 🚀 Performance Metrics
 
-- ✅ Reliably processes tens of billions of data entries daily
-- ⚡️ Handles hundreds of thousands of entries per second per instance
-- 💾 Controlled memory usage, supports large-scale distributed deployment
-- 🔥 Excellent performance in high-concurrency and big data scenarios
+-   ✅ Reliably processes tens of billions of data entries daily
+-   ⚡️ Handles hundreds of thousands of entries per second per instance
+-   💾 Controlled memory usage, supports large-scale distributed deployment
+-   🔥 Excellent performance in high-concurrency and big data scenarios
 
 ## ✨ Features
 
-- 🎯 Generic support for processing any data type
-- 🔄 Provides both synchronous and asynchronous processing modes
-- 🎨 Data deduplication support
-- ⚙️ Configurable batch size and flush intervals
-- 🛡️ Built-in error handling and recovery mechanisms
-- 🎊 Graceful shutdown and resource release
+-   🎯 Generic support for processing any data type
+-   🔄 Provides both synchronous and asynchronous processing modes
+-   🎨 Data deduplication support
+-   ⚙️ Configurable batch size and flush intervals
+-   🛡️ Built-in error handling and recovery mechanisms
+-   🎊 Graceful shutdown and resource release
 
-- Production Environment Validation:
-  - Stable operation with tens of billions of daily data entries
-  - Single instance processes hundreds of thousands of entries per second
-  - Controlled memory usage, supports large-scale distributed deployment
-  - Excellent performance in high-concurrency and big data scenarios
+-   Production Environment Validation:
+    -   Stable operation with tens of billions of daily data entries
+    -   Single instance processes hundreds of thousands of entries per second
+    -   Controlled memory usage, supports large-scale distributed deployment
+    -   Excellent performance in high-concurrency and big data scenarios
 
 ## Installation
 
@@ -286,18 +286,18 @@ graph TB
     - Adjust based on real-time requirements
     - Smaller intervals improve real-time performance but increase processing overhead
 
-## TODO
+## Usage Recommendations
 
 1. Concurrency Control
 
-    - Implement goroutine pool to control concurrency
-    - Prevent goroutine leaks under high load
+    - Consider implementing goroutine pool to control concurrency
+    - Take measures to prevent goroutine leaks under high load
 
-2. Enhanced Error Handling
+2. Error Handling Enhancement
 
-    - Add error callback mechanism
-    - Implement more comprehensive graceful shutdown
-    - Provide batch processing status tracking
+    - Consider adding error callback mechanism
+    - Implement comprehensive graceful shutdown strategy
+    - Consider adding batch processing status tracking
 
 3. Performance Optimization
 
@@ -313,3 +313,7 @@ graph TB
     - Add detailed logging
     - Integrate monitoring metrics export
     - Provide debugging interfaces
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
