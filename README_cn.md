@@ -5,6 +5,7 @@
 [![Go Tests](https://github.com/rushairer/go-pipeline/actions/workflows/test.yml/badge.svg)](https://github.com/rushairer/go-pipeline/actions/workflows/test.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rushairer/go-pipeline)](https://goreportcard.com/report/github.com/rushairer/go-pipeline)
 [![GoDoc](https://godoc.org/github.com/rushairer/go-pipeline?status.svg)](https://godoc.org/github.com/rushairer/go-pipeline)
+[![Latest Release](https://img.shields.io/github/v/release/rushairer/go-pipeline.svg)](https://github.com/rushairer/go-pipeline/releases)
 [![License](https://img.shields.io/github/license/rushairer/go-pipeline.svg)](https://github.com/rushairer/go-pipeline/blob/main/LICENSE)
 
 一个高性能、可配置的 Go 语言数据处理管道库，支持批量处理和数据去重功能。
