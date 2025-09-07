@@ -123,13 +123,15 @@ func (p *PipelineImpl[T]) performLoop(
 
 	for {
 		select {
-		case event := <-p.dataChan:
-			batchData = p.processor.addToBatch(batchData, event)
-			if !p.processor.isBatchFull(batchData) {
-				continue
+		case newData, ok := <-p.dataChan:
+			if ok {
+				batchData = p.processor.addToBatch(batchData, newData)
+				if !p.processor.isBatchFull(batchData) {
+					continue
+				}
+				p.doFlush(ctx, async, batchData)
+				batchData = p.processor.initBatchData()
 			}
-			p.doFlush(ctx, async, batchData)
-			batchData = p.processor.initBatchData()
 		case <-ticker.C:
 			if p.processor.isBatchEmpty(batchData) {
 				continue
