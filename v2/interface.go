@@ -51,16 +51,14 @@ type Performer[T any] interface {
 	// AsyncPerform 异步执行管道操作
 	// 参数:
 	//   - ctx: 上下文对象，用于控制操作的生命周期
-	//   - flushError: 用于接收执行过程中发生的错误
 	// 返回值: 如果ctx被取消则返回error
-	AsyncPerform(ctx context.Context, flushError chan<- error) error
+	AsyncPerform(ctx context.Context) error
 
 	// SyncPerform 同步执行管道操作
 	// 参数:
 	//   - ctx: 上下文对象，用于控制操作的生命周期
-	//   - flushError: 用于接收执行过程中发生的错误
 	// 返回值: 如果ctx被取消则返回error
-	SyncPerform(ctx context.Context, flushError chan<- error) error
+	SyncPerform(ctx context.Context) error
 }
 
 // Pipeline 通过嵌入其他接口定义了所有管道类型的通用接口
@@ -69,4 +67,7 @@ type Pipeline[T any] interface {
 	DataAdder[T]
 	Performer[T]
 	DataProcessor[T]
+
+	Close(context.Context)
+	ErrorChan() <-chan error
 }

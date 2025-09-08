@@ -11,13 +11,11 @@ type PipelineImpl[T any] struct {
 	// config 存储管道的配置信息
 	config PipelineConfig
 	// dataChan 用于数据传输的通道
-	dataChan       chan T
-	dataChanClosed chan struct{}
+	dataChan chan T
 	// processor 用于处理批量数据的处理器
 	processor DataProcessor[T]
 	// 错误通道，用于捕获和报告异步执行过程中的错误
-	errorChan       chan error
-	errorChanClosed chan struct{}
+	errorChan chan error
 }
 
 // 确保 StandardPipeline 实现了 Performer 接口
@@ -37,12 +35,10 @@ func NewPipelineImpl[T any](
 	processor DataProcessor[T],
 ) *PipelineImpl[T] {
 	return &PipelineImpl[T]{
-		config:          config,
-		dataChan:        make(chan T, config.BufferSize),
-		dataChanClosed:  make(chan struct{}),
-		processor:       processor,
-		errorChan:       make(chan error, 1),
-		errorChanClosed: make(chan struct{}),
+		config:    config,
+		dataChan:  make(chan T, config.BufferSize),
+		processor: processor,
+		errorChan: make(chan error, 1),
 	}
 }
 
@@ -57,14 +53,19 @@ func (p *PipelineImpl[T]) Add(
 	ctx context.Context,
 	data T,
 ) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = ErrContextIsClosed
+		}
+	}()
+
 	select {
 	case <-ctx.Done():
 		return ErrContextIsClosed
-	case <-p.dataChanClosed:
-		return ErrChannelIsClosed
-	case p.dataChan <- data:
+	default:
+		p.dataChan <- data
+		return nil
 	}
-	return
 }
 
 // AsyncPerform 异步执行管道操作
@@ -72,8 +73,7 @@ func (p *PipelineImpl[T]) Add(
 //   - ctx: 上下文对象，用于控制操作的生命周期
 //
 // 返回值: 如果执行过程中发生错误则返回error
-func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context, flushError chan<- error) error {
-	go p.rangeErrorChan(ctx, flushError)
+func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context) error {
 	err := p.performLoop(ctx, true)
 	return err
 }
@@ -83,27 +83,9 @@ func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context, flushError chan<- er
 //   - ctx: 上下文对象，用于控制操作的生命周期
 //
 // 返回值: 如果执行过程中发生错误则返回error
-func (p *PipelineImpl[T]) SyncPerform(ctx context.Context, flushError chan<- error) error {
-	go p.rangeErrorChan(ctx, flushError)
+func (p *PipelineImpl[T]) SyncPerform(ctx context.Context) error {
 	err := p.performLoop(ctx, false)
 	return err
-}
-
-func (p *PipelineImpl[T]) rangeErrorChan(ctx context.Context, flushError chan<- error) {
-	defer close(flushError)
-	defer close(p.errorChan)
-	defer close(p.errorChanClosed)
-
-	for {
-		select {
-		case chanError, ok := <-p.errorChan:
-			if ok {
-				flushError <- chanError
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
 }
 
 // performLoop 实现了通用的执行循环逻辑
@@ -112,14 +94,10 @@ func (p *PipelineImpl[T]) rangeErrorChan(ctx context.Context, flushError chan<- 
 // 参数:
 //   - ctx: 上下文对象，用于控制操作的生命周期
 //   - async: 是否使用异步模式处理数据
-
 func (p *PipelineImpl[T]) performLoop(
 	ctx context.Context,
 	async bool,
 ) error {
-	defer close(p.dataChan)
-	defer close(p.dataChanClosed)
-
 	ticker := time.NewTicker(p.config.FlushInterval)
 	defer ticker.Stop()
 
@@ -172,12 +150,30 @@ func (p *PipelineImpl[T]) doFlush(
 		p.flushWithErrorChan(ctx, batchData)
 	}
 }
+
+// flushWithErrorChan 执行数据刷新操作，并将刷新结果发送到错误通道中
+// 参数:
+//   - ctx: 上下文对象，用于控制操作的生命周期
+//   - batchData: 待刷新的数据批次
 func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any) {
-	if err := p.processor.flush(ctx, batchData); err != nil {
-		select {
-		case p.errorChan <- err:
-		case <-p.errorChanClosed:
-			return
+	defer func() {
+		if r := recover(); r != nil {
 		}
+	}()
+
+	if err := p.processor.flush(ctx, batchData); err != nil {
+		p.errorChan <- err
 	}
+}
+
+// Close 关闭管道
+// 该方法关闭管道的输入通道和错误通道，防止新的数据被添加到管道中
+func (p *PipelineImpl[T]) Close() {
+	close(p.dataChan)
+	close(p.errorChan)
+}
+
+// 让调用方直接监听内部 errorChan
+func (p *PipelineImpl[T]) ErrorChan() <-chan error {
+	return p.errorChan
 }

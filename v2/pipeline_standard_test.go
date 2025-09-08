@@ -16,12 +16,7 @@ func TestStandardPipelineAsyncPerform(t *testing.T) {
 	defer cancel()
 
 	var processedCount int
-	pipeline := gopipeline.NewStandardPipeline(
-		gopipeline.PipelineConfig{
-			FlushSize:     32,
-			BufferSize:    64,
-			FlushInterval: time.Millisecond * 100,
-		},
+	pipeline := gopipeline.NewDefaultStandardPipeline(
 		func(ctx context.Context, batchData []int) error {
 			select {
 			case <-ctx.Done():
@@ -35,27 +30,33 @@ func TestStandardPipelineAsyncPerform(t *testing.T) {
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.AsyncPerform(ctx, flushError)
+	go pipeline.AsyncPerform(ctx)
 
 	// Add some data
-	for i := 0; i < 6478017; i++ {
-		if err := pipeline.Add(ctx, i); err != nil {
-			t.Fatalf("Failed to add item: %v", err)
+	go func() {
+		for i := 0; i < 6478017; i++ {
+			if err := pipeline.Add(ctx, i); err != nil {
+				t.Errorf("Failed to add item: %v", err)
+			}
+		}
+	}()
+
+	for {
+		select {
+		case err, ok := <-pipeline.ErrorChan():
+			if ok {
+				t.Errorf("Expected no error, got %v", err)
+			} else {
+				goto validation
+			}
+		case <-ctx.Done():
+			goto validation
 		}
 	}
 
-	select {
-	case err, ok := <-flushError:
-		if ok {
-			t.Errorf("Expected no error, got %v", err)
-		} else {
-			t.Log("flushError closed")
-		}
-	case <-ctx.Done():
-	}
-
+validation:
 	if processedCount != 6478017 {
 		t.Errorf("Expected 6478017 processed items, got %d", processedCount)
 	}
@@ -76,6 +77,7 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 		func(ctx context.Context, batchData []int) error {
 			select {
 			case <-ctx.Done():
+				return nil
 			default:
 				// AsyncPerform 时 可以是 flush无序更加明显
 				time.Sleep(time.Millisecond * 10)
@@ -86,26 +88,37 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 			}
 			return newErrorWithData(batchData, errors.New("test error"))
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.AsyncPerform(ctx, flushError)
+	go pipeline.AsyncPerform(ctx)
 
 	// Add some data
-	for i := 0; i < 6478017; i++ {
-		if err := pipeline.Add(ctx, i); err != nil {
-			t.Fatalf("Failed to add item: %v", err)
-		}
-	}
-
-	for err := range flushError {
-		t.Log(err)
-		if e, ok := err.(errorWithData); ok {
-			if e.Err.Error() != "test error" {
-				t.Errorf("Expected error, got nil")
+	go func() {
+		for i := 0; i < 6478017; i++ {
+			if err := pipeline.Add(ctx, i); err != nil {
+				t.Errorf("Failed to add item: %v", err)
 			}
 		}
+	}()
+
+	for {
+		select {
+		case err, ok := <-pipeline.ErrorChan():
+			if ok {
+				if e, ok := err.(errorWithData); ok {
+					if e.Err.Error() != "test error" {
+						t.Errorf("Expected error, got nil")
+					}
+				}
+			} else {
+				goto validation
+			}
+		case <-ctx.Done():
+			goto validation
+		}
 	}
 
+validation:
 	if processedCount != 6478017 {
 		t.Errorf("Expected 6478017 processed items, got %d", processedCount)
 	}
@@ -136,34 +149,41 @@ func TestStandardPipelineAsyncPerformTimeout(t *testing.T) {
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.AsyncPerform(ctx, flushError)
+	go pipeline.AsyncPerform(ctx)
 
 	// Add some data
-	for i := 0; i < 6478017; i++ {
-		if err := pipeline.Add(ctx, i); err != nil {
-			if errors.Is(err, gopipeline.ErrContextIsClosed) {
-				t.Log("gopipeline.ErrContextIsClosed", err)
-				break
-			} else if errors.Is(err, gopipeline.ErrChannelIsClosed) {
-				t.Log("gopipeline.ErrChannelIsClosed", err)
-			} else {
-				t.Fatalf("Failed to add item: %v", err)
+	go func() {
+		for i := 0; i < 6478017; i++ {
+			if err := pipeline.Add(ctx, i); err != nil {
+				if errors.Is(err, gopipeline.ErrContextIsClosed) {
+					t.Log("gopipeline.ErrContextIsClosed", err)
+					break
+				} else if errors.Is(err, gopipeline.ErrChannelIsClosed) {
+					t.Log("gopipeline.ErrChannelIsClosed", err)
+				} else {
+					t.Errorf("Failed to add item: %v", err)
+				}
 			}
 		}
-	}
+	}()
 
-	select {
-	case err, ok := <-flushError:
-		if ok {
-			t.Errorf("Expected no error, got %v", err)
-		} else {
-			t.Log("flushError closed")
+	for {
+
+		select {
+		case err, ok := <-pipeline.ErrorChan():
+			if ok {
+				t.Errorf("Expected no error, got %v", err)
+			} else {
+				goto validation
+			}
+		case <-ctx.Done():
+			goto validation
 		}
-	case <-ctx.Done():
 	}
 
+validation:
 	if processedCount == 6478017 {
 		t.Errorf("Expected less than 6478017 processed items, got %d", processedCount)
 	}
@@ -194,27 +214,33 @@ func TestStandardPipelineSyncPerform(t *testing.T) {
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.SyncPerform(ctx, flushError)
+	go pipeline.SyncPerform(ctx)
 
 	// Add some data
-	for i := 0; i < 2000; i++ {
-		if err := pipeline.Add(ctx, i); err != nil {
-			t.Fatalf("Failed to add item: %v", err)
+	go func() {
+		for i := 0; i < 2000; i++ {
+			if err := pipeline.Add(ctx, i); err != nil {
+				t.Errorf("Failed to add item: %v", err)
+			}
+		}
+	}()
+
+	for {
+		select {
+		case err, ok := <-pipeline.ErrorChan():
+			if ok {
+				t.Errorf("Expected no error, got %v", err)
+			} else {
+				goto validation
+			}
+		case <-ctx.Done():
+			goto validation
 		}
 	}
 
-	select {
-	case err, ok := <-flushError:
-		if ok {
-			t.Errorf("Expected no error, got %v", err)
-		} else {
-			t.Log("flushError closed")
-		}
-	case <-ctx.Done():
-	}
-
+validation:
 	if processedCount != 2000 {
 		t.Errorf("Expected 2000 processed items, got %d", processedCount)
 	}
@@ -245,26 +271,37 @@ func TestStandardPipelineSyncPerformWithFlushError(t *testing.T) {
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.SyncPerform(ctx, flushError)
+	go pipeline.SyncPerform(ctx)
 
 	// Add some data
-	for i := 0; i < 2000; i++ {
-		if err := pipeline.Add(ctx, i); err != nil {
-			t.Fatalf("Failed to add item: %v", err)
-		}
-	}
-
-	for err := range flushError {
-		t.Log(err)
-		if e, ok := err.(errorWithData); ok {
-			if e.Err.Error() != "test error" {
-				t.Errorf("Expected error, got nil")
+	go func() {
+		for i := 0; i < 2000; i++ {
+			if err := pipeline.Add(ctx, i); err != nil {
+				t.Errorf("Failed to add item: %v", err)
 			}
 		}
+	}()
+
+	for {
+		select {
+		case err, ok := <-pipeline.ErrorChan():
+			if ok {
+				if e, ok := err.(errorWithData); ok {
+					if e.Err.Error() != "test error" {
+						t.Errorf("Expected error, got nil")
+					}
+				}
+			} else {
+				goto validation
+			}
+		case <-ctx.Done():
+			goto validation
+		}
 	}
 
+validation:
 	if processedCount != 2000 {
 		t.Errorf("Expected 2000 processed items, got %d", processedCount)
 	}
@@ -296,37 +333,61 @@ func TestStandardPipelineSyncPerformTimeout(t *testing.T) {
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.SyncPerform(ctx, flushError)
+	go pipeline.SyncPerform(ctx)
 
 	// Add some data
-	for i := 0; i < 2000; i++ {
-		if err := pipeline.Add(ctx, i); err != nil {
-			if errors.Is(err, gopipeline.ErrContextIsClosed) {
-				t.Log("gopipeline.ErrContextIsClosed", err)
-				break
-			} else if errors.Is(err, gopipeline.ErrChannelIsClosed) {
-				t.Log("gopipeline.ErrChannelIsClosed", err)
-			} else {
-				t.Fatalf("Failed to add item: %v", err)
+	go func() {
+		for i := 0; i < 2000; i++ {
+			if err := pipeline.Add(ctx, i); err != nil {
+				if errors.Is(err, gopipeline.ErrContextIsClosed) {
+					break
+				} else if errors.Is(err, gopipeline.ErrChannelIsClosed) {
+					t.Log("gopipeline.ErrChannelIsClosed", err)
+				} else {
+					t.Errorf("Failed to add item: %v", err)
+				}
 			}
 		}
-	}
+	}()
 
-	select {
-	case err, ok := <-flushError:
-		if ok {
-			t.Errorf("Expected no error, got %v", err)
-		} else {
-			t.Log("flushError closed")
+	for {
+		select {
+		case err, ok := <-pipeline.ErrorChan():
+			if ok {
+				t.Errorf("Expected no error, got %v", err)
+			} else {
+				goto validation
+			}
+		case <-ctx.Done():
+			goto validation
 		}
-	case <-ctx.Done():
 	}
 
+validation:
 	if processedCount == 2000 {
 		t.Errorf("Expected less than 2000 processed items, got %d", processedCount)
 	}
+}
+
+func TestStandardPipelineWhenDataChanIsClosed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+
+	pipeline := gopipeline.NewDefaultStandardPipeline(
+		func(ctx context.Context, batchData []int) error {
+			return nil
+		},
+	)
+	defer pipeline.Close()
+
+	cancel()
+
+	pipeline.AsyncPerform(ctx)
+	if err := pipeline.Add(ctx, 1); err == nil {
+		t.Errorf("Expected ErrChannelIsClosed or ErrContextIsClosed, got %v", err)
+	}
+
 }
 
 type errorWithData struct {

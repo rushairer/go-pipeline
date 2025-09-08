@@ -15,5 +15,5 @@ type PipelineConfig struct {
 const (
 	defaultFlushSize     = 32
 	defaultBufferSize    = 64
-	defaultFlushInterval = time.Second * 10
+	defaultFlushInterval = time.Microsecond * 200
 )

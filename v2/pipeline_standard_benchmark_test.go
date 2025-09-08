@@ -15,54 +15,32 @@ type TestData struct {
 	Age     uint
 }
 
-func BenchmarkStandardPipelineAsyncPerform(b *testing.B) {
-	ctx := context.Background()
-	var processedCount int
-	var processedCount2 int
+func BenchmarkDefaultStandardPipelineAsyncPerform(b *testing.B) {
 
-	pipeline := gopipeline.NewStandardPipeline(
-		gopipeline.PipelineConfig{
-			FlushSize:     32,
-			BufferSize:    64,
-			FlushInterval: time.Millisecond * 100,
-		},
+	ctx := context.Background()
+
+	pipeline := gopipeline.NewDefaultStandardPipeline(
 		func(ctx context.Context, batchData []TestData) error {
 			time.Sleep(time.Microsecond * 100)
-			processedCount += len(batchData)
+
 			for _, data := range batchData {
-				select {
-				case <-ctx.Done():
-				default:
-					data.Age = data.Age + 1
-				}
+				data.Age = data.Age + 1
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.AsyncPerform(ctx, flushError)
+	go pipeline.AsyncPerform(ctx)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
 		pipeline.Add(ctx, TestData{Name: fmt.Sprintf("name:%d", i), Address: "Some address string", Age: 20})
-		processedCount2 = processedCount2 + 1
 	}
-
-	select {
-	case err, ok := <-flushError:
-		if ok {
-			b.Errorf("Expected no error, got %v", err)
-		} else {
-			b.Log("flushError closed")
-		}
-	default:
-	}
-	b.Log(processedCount, processedCount2)
 
 }
 
-func BenchmarkStandardPipelineAsyncPerform2(b *testing.B) {
+func BenchmarkCustomStandardPipelineAsyncPerform(b *testing.B) {
 	ctx := context.Background()
 	var processedCount int
 
@@ -84,9 +62,9 @@ func BenchmarkStandardPipelineAsyncPerform2(b *testing.B) {
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.AsyncPerform(ctx, flushError)
+	go pipeline.AsyncPerform(ctx)
 
 	b.ResetTimer()
 
@@ -97,16 +75,11 @@ func BenchmarkStandardPipelineAsyncPerform2(b *testing.B) {
 	b.Log(processedCount)
 }
 
-func BenchmarkStandardPipelineSyncPerform(b *testing.B) {
+func BenchmarkDefaultStandardPipelineSyncPerform(b *testing.B) {
 	ctx := context.Background()
 	var processedCount int
 
-	pipeline := gopipeline.NewStandardPipeline(
-		gopipeline.PipelineConfig{
-			FlushSize:     32,
-			BufferSize:    64,
-			FlushInterval: time.Millisecond * 100,
-		},
+	pipeline := gopipeline.NewDefaultStandardPipeline(
 		func(ctx context.Context, batchData []TestData) error {
 			time.Sleep(time.Microsecond * 100)
 			processedCount += len(batchData)
@@ -119,9 +92,9 @@ func BenchmarkStandardPipelineSyncPerform(b *testing.B) {
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.SyncPerform(ctx, flushError)
+	go pipeline.SyncPerform(ctx)
 
 	b.ResetTimer()
 
@@ -132,7 +105,7 @@ func BenchmarkStandardPipelineSyncPerform(b *testing.B) {
 	b.Log(processedCount)
 }
 
-func BenchmarkStandardPipelineSyncPerform2(b *testing.B) {
+func BenchmarkCustomStandardPipelineSyncPerform(b *testing.B) {
 	ctx := context.Background()
 	var processedCount int
 
@@ -154,9 +127,9 @@ func BenchmarkStandardPipelineSyncPerform2(b *testing.B) {
 			}
 			return nil
 		})
+	defer pipeline.Close()
 
-	var flushError = make(chan error, 1)
-	go pipeline.SyncPerform(ctx, flushError)
+	go pipeline.SyncPerform(ctx)
 
 	b.ResetTimer()
 
