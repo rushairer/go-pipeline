@@ -2,8 +2,6 @@ package gopipeline
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"time"
 )
 
@@ -13,11 +11,13 @@ type PipelineImpl[T any] struct {
 	// config 存储管道的配置信息
 	config PipelineConfig
 	// dataChan 用于数据传输的通道
-	dataChan chan T
+	dataChan       chan T
+	dataChanClosed chan struct{}
 	// processor 用于处理批量数据的处理器
 	processor DataProcessor[T]
 	// 错误通道，用于捕获和报告异步执行过程中的错误
-	errorChan chan error
+	errorChan       chan error
+	errorChanClosed chan struct{}
 }
 
 // 确保 StandardPipeline 实现了 Performer 接口
@@ -37,10 +37,12 @@ func NewPipelineImpl[T any](
 	processor DataProcessor[T],
 ) *PipelineImpl[T] {
 	return &PipelineImpl[T]{
-		config:    config,
-		dataChan:  make(chan T, config.BufferSize),
-		processor: processor,
-		errorChan: make(chan error, 1),
+		config:          config,
+		dataChan:        make(chan T, config.BufferSize),
+		dataChanClosed:  make(chan struct{}),
+		processor:       processor,
+		errorChan:       make(chan error, 1),
+		errorChanClosed: make(chan struct{}),
 	}
 }
 
@@ -55,17 +57,12 @@ func (p *PipelineImpl[T]) Add(
 	ctx context.Context,
 	data T,
 ) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%w: %v", ErrAddedError, r)
-		}
-	}()
-
 	select {
 	case <-ctx.Done():
 		return ErrContextIsClosed
-	default:
-		p.dataChan <- data
+	case <-p.dataChanClosed:
+		return ErrChannelIsClosed
+	case p.dataChan <- data:
 	}
 	return
 }
@@ -76,7 +73,7 @@ func (p *PipelineImpl[T]) Add(
 //
 // 返回值: 如果执行过程中发生错误则返回error
 func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context, flushError chan<- error) error {
-	go p.rangeErrorChan(flushError)
+	go p.rangeErrorChan(ctx, flushError)
 	err := p.performLoop(ctx, true)
 	return err
 }
@@ -87,18 +84,25 @@ func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context, flushError chan<- er
 //
 // 返回值: 如果执行过程中发生错误则返回error
 func (p *PipelineImpl[T]) SyncPerform(ctx context.Context, flushError chan<- error) error {
-	go p.rangeErrorChan(flushError)
+	go p.rangeErrorChan(ctx, flushError)
 	err := p.performLoop(ctx, false)
 	return err
 }
 
-func (p *PipelineImpl[T]) rangeErrorChan(flushError chan<- error) {
+func (p *PipelineImpl[T]) rangeErrorChan(ctx context.Context, flushError chan<- error) {
 	defer close(flushError)
-	for chanError := range p.errorChan {
-		if chanError == nil {
-			log.Printf("errorChan is nil")
+	defer close(p.errorChan)
+	defer close(p.errorChanClosed)
+
+	for {
+		select {
+		case chanError, ok := <-p.errorChan:
+			if ok {
+				flushError <- chanError
+			}
+		case <-ctx.Done():
+			return
 		}
-		flushError <- chanError
 	}
 }
 
@@ -114,7 +118,7 @@ func (p *PipelineImpl[T]) performLoop(
 	async bool,
 ) error {
 	defer close(p.dataChan)
-	defer close(p.errorChan)
+	defer close(p.dataChanClosed)
 
 	ticker := time.NewTicker(p.config.FlushInterval)
 	defer ticker.Stop()
@@ -170,6 +174,10 @@ func (p *PipelineImpl[T]) doFlush(
 }
 func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any) {
 	if err := p.processor.flush(ctx, batchData); err != nil {
-		p.errorChan <- err
+		select {
+		case p.errorChan <- err:
+		case <-p.errorChanClosed:
+			return
+		}
 	}
 }
