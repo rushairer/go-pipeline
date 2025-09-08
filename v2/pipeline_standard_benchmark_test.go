@@ -23,8 +23,8 @@ func BenchmarkDefaultStandardPipelineAsyncPerform(b *testing.B) {
 		func(ctx context.Context, batchData []TestData) error {
 			time.Sleep(time.Microsecond * 100)
 
-			for _, data := range batchData {
-				data.Age = data.Age + 1
+			for i := range batchData {
+				batchData[i].Age = batchData[i].Age + 1
 			}
 			return nil
 		})
@@ -37,28 +37,24 @@ func BenchmarkDefaultStandardPipelineAsyncPerform(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		pipeline.Add(ctx, TestData{Name: fmt.Sprintf("name:%d", i), Address: "Some address string", Age: 20})
 	}
+
+	b.StopTimer()
 
 }
 
 func BenchmarkCustomStandardPipelineAsyncPerform(b *testing.B) {
 	ctx := context.Background()
-	var processedCount int
 
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			FlushSize:     512,
-			BufferSize:    1024,
+			FlushSize:     32,
+			BufferSize:    64,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []TestData) error {
 			time.Sleep(time.Microsecond * 100)
-			processedCount += len(batchData)
-			for _, data := range batchData {
-				select {
-				case <-ctx.Done():
-				default:
-					data.Age = data.Age + 1
-				}
+			for i := range batchData {
+				batchData[i].Age = batchData[i].Age + 1
 			}
 			return nil
 		})
@@ -72,23 +68,18 @@ func BenchmarkCustomStandardPipelineAsyncPerform(b *testing.B) {
 		pipeline.Add(ctx, TestData{Name: fmt.Sprintf("name:%d", i), Address: "Some address string", Age: 20})
 	}
 
-	b.Log(processedCount)
+	b.StopTimer()
+
 }
 
 func BenchmarkDefaultStandardPipelineSyncPerform(b *testing.B) {
 	ctx := context.Background()
-	var processedCount int
 
 	pipeline := gopipeline.NewDefaultStandardPipeline(
 		func(ctx context.Context, batchData []TestData) error {
 			time.Sleep(time.Microsecond * 100)
-			processedCount += len(batchData)
-			for _, data := range batchData {
-				select {
-				case <-ctx.Done():
-				default:
-					data.Age = data.Age + 1
-				}
+			for i := range batchData {
+				batchData[i].Age = batchData[i].Age + 1
 			}
 			return nil
 		})
@@ -102,12 +93,12 @@ func BenchmarkDefaultStandardPipelineSyncPerform(b *testing.B) {
 		pipeline.Add(ctx, TestData{Name: fmt.Sprintf("name:%d", i), Address: "Some address string", Age: 20})
 	}
 
-	b.Log(processedCount)
+	b.StopTimer()
+
 }
 
 func BenchmarkCustomStandardPipelineSyncPerform(b *testing.B) {
 	ctx := context.Background()
-	var processedCount int
 
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
@@ -117,13 +108,8 @@ func BenchmarkCustomStandardPipelineSyncPerform(b *testing.B) {
 		},
 		func(ctx context.Context, batchData []TestData) error {
 			time.Sleep(time.Microsecond * 100)
-			processedCount += len(batchData)
-			for _, data := range batchData {
-				select {
-				case <-ctx.Done():
-				default:
-					data.Age = data.Age + 1
-				}
+			for i := range batchData {
+				batchData[i].Age = batchData[i].Age + 1
 			}
 			return nil
 		})
@@ -137,5 +123,6 @@ func BenchmarkCustomStandardPipelineSyncPerform(b *testing.B) {
 		pipeline.Add(ctx, TestData{Name: fmt.Sprintf("name:%d", i), Address: "Some address string", Age: 20})
 	}
 
-	b.Log(processedCount)
+	b.StopTimer()
+
 }
