@@ -1,6 +1,6 @@
 # Go Pipeline v2
 
-[English](README.md) | [中文](README_cn.md)
+[English](README.md) | [中文](README_cn.md) | [📖 官网文档](https://rushairer.github.io/go-pipeline-homepage/)
 
 [![Go Tests](https://github.com/rushairer/go-pipeline/actions/workflows/test.yml/badge.svg)](https://github.com/rushairer/go-pipeline/actions/workflows/test.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rushairer/go-pipeline/v2)](https://goreportcard.com/report/github.com/rushairer/go-pipeline/v2)
