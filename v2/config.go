@@ -13,7 +13,8 @@ type PipelineConfig struct {
 }
 
 const (
-	defaultBufferSize    = 32
-	defaultFlushSize     = 64
-	defaultFlushInterval = time.Millisecond * 200
+	// 基于性能测试优化的默认值
+	defaultBufferSize    = 100                   // 缓冲区大小，应该 >= FlushSize * 2 以避免阻塞
+	defaultFlushSize     = 50                    // 批处理大小，性能测试显示 50 左右为最优
+	defaultFlushInterval = time.Millisecond * 50 // 刷新间隔，平衡延迟和吞吐量
 )

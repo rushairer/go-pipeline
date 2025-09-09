@@ -2,7 +2,6 @@ package gopipeline
 
 import (
 	"context"
-	"log"
 	"time"
 )
 
@@ -22,8 +21,8 @@ type PipelineImpl[T any] struct {
 // 确保 StandardPipeline 实现了 Performer 接口
 var _ Performer[any] = (*PipelineImpl[any])(nil)
 
-// 确保 StandardPipeline 实现了 DataAdder 接口
-var _ DataAdder[any] = (*PipelineImpl[any])(nil)
+// 确保 StandardPipeline 实现了 PipelineChannel 接口
+var _ PipelineChannel[any] = (*PipelineImpl[any])(nil)
 
 // NewPipelineImpl 创建一个新的基础管道实现实例
 // 参数:
@@ -39,34 +38,12 @@ func NewPipelineImpl[T any](
 		config:    config,
 		dataChan:  make(chan T, config.BufferSize),
 		processor: processor,
-		errorChan: make(chan error, int((config.FlushSize+config.BufferSize-1)/config.BufferSize)),
+		errorChan: nil,
 	}
 }
 
-// Add 实现了所有管道的通用Add方法
-// 该方法将数据添加到管道的缓冲通道中，支持并发安全的操作
-// 参数:
-//   - ctx: 上下文对象，用于控制操作的生命周期
-//   - data: 要添加到管道的数据
-//
-// 返回值: 如果添加过程中发生错误则返回error
-func (p *PipelineImpl[T]) Add(
-	ctx context.Context,
-	data T,
-) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = ErrContextIsClosed
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return ErrContextIsClosed
-	default:
-		p.dataChan <- data
-		return nil
-	}
+func (p *PipelineImpl[T]) DataChan() chan<- T {
+	return p.dataChan
 }
 
 // AsyncPerform 异步执行管道操作
@@ -163,24 +140,40 @@ func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any)
 	}()
 
 	if err := p.processor.flush(ctx, batchData); err != nil {
-		select {
-		case p.errorChan <- err:
-			// 成功发送错误
-		default:
-			// 通道已满，丢弃错误或记录日志
-			log.Printf("pipeline error channel is full, discard error: %v", err)
-		}
+		// 安全地发送错误到错误通道
+		p.safeErrorSend(err)
 	}
 }
 
-// Close 关闭管道
-// 该方法关闭管道的输入通道和错误通道，防止新的数据被添加到管道中
-func (p *PipelineImpl[T]) Close() {
-	close(p.dataChan)
-	close(p.errorChan)
+// safeErrorSend 安全地发送错误到错误通道
+// 如果错误通道未初始化（用户未调用ErrorChan），则跳过错误发送
+func (p *PipelineImpl[T]) safeErrorSend(err error) {
+	if p.errorChan == nil {
+		// 用户未调用 ErrorChan() 方法，跳过错误处理
+		return
+	}
+
+	// 使用非阻塞发送，避免阻塞管道处理
+	go func() {
+		select {
+		case p.errorChan <- err:
+			// 错误发送成功
+		default:
+			// 错误通道已满，跳过此错误
+			// 可以在这里添加日志记录
+		}
+	}()
 }
 
 // 让调用方直接监听内部 errorChan
-func (p *PipelineImpl[T]) ErrorChan() <-chan error {
+func (p *PipelineImpl[T]) ErrorChan(size int) <-chan error {
+	if p.errorChan != nil {
+		return p.errorChan
+	}
+	if size == 0 {
+		p.errorChan = make(chan error, int((p.config.FlushSize+p.config.BufferSize-1)/p.config.BufferSize))
+	} else {
+		p.errorChan = make(chan error, size)
+	}
 	return p.errorChan
 }

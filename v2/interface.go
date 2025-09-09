@@ -36,14 +36,17 @@ type DataProcessor[T any] interface {
 	isBatchEmpty(batchData any) bool
 }
 
-// DataAdder 定义了向管道添加数据的接口
-type DataAdder[T any] interface {
-	// Add 将数据添加到管道中
+// PipelineChannel 定义了管道的通道接口
+type PipelineChannel[T any] interface {
+
+	// DataChan 返回一个可写的通道，用于将数据添加到管道中
+	DataChan() chan<- T
+
+	// ErrorChan 返回一个只读的通道，用于接收管道中的错误信息
 	// 参数:
-	//   - ctx: 上下文对象，用于控制操作的生命周期
-	//   - data: 要添加到管道的数据
-	// 返回值: 如果添加过程中发生错误则返回error
-	Add(ctx context.Context, data T) error
+	//   - size: 通道的大小，用于限制并发度
+	// 返回值: 返回一个只读的通道，用于接收管道中的错误信息。这个通道是只读的，因此无法向其发送数据。
+	ErrorChan(size int) <-chan error
 }
 
 // Performer 定义了执行管道操作的接口
@@ -64,10 +67,7 @@ type Performer[T any] interface {
 // Pipeline 通过嵌入其他接口定义了所有管道类型的通用接口
 // 这个接口组合了数据添加、执行操作和数据处理的能力
 type Pipeline[T any] interface {
-	DataAdder[T]
+	PipelineChannel[T]
 	Performer[T]
 	DataProcessor[T]
-
-	Close(context.Context)
-	ErrorChan() <-chan error
 }

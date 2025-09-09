@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,333 +17,347 @@ type TestData struct {
 	Age     uint
 }
 
-func BenchmarkDefaultStandardPipelineAsyncPerform(b *testing.B) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+// BenchmarkPipelineThroughput 测试管道的数据吞吐量
+func BenchmarkPipelineThroughput(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var processedCount int
-	var mux sync.Mutex
+	var processedCount int64
 
-	pipeline := gopipeline.NewDefaultStandardPipeline(
+	// 使用优化的配置来确保快速处理
+	pipeline := gopipeline.NewStandardPipeline(
+		gopipeline.PipelineConfig{
+			BufferSize:    uint32(b.N + 100),    // 足够大的缓冲区
+			FlushSize:     10,                   // 小批次，快速处理
+			FlushInterval: time.Millisecond * 1, // 很短的间隔
+		},
 		func(ctx context.Context, batchData []TestData) error {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				// 模拟处理时间
-				time.Sleep(time.Millisecond * 10)
-				mux.Lock()
-				processedCount += len(batchData)
-				for i := range batchData {
-					batchData[i].Age = batchData[i].Age + 1
-				}
-				mux.Unlock()
-			}
+			// 模拟最小的处理开销
+			atomic.AddInt64(&processedCount, int64(len(batchData)))
 			return nil
 		})
-	defer pipeline.Close()
 
-	// 启动异步处理
-	go func() {
-		if err := pipeline.AsyncPerform(ctx); err != nil {
-			b.Log(err)
-		}
-	}()
+	// 启动管道处理
+	go pipeline.AsyncPerform(ctx)
 
-	// 监听错误
-	go func() {
-		for err := range pipeline.ErrorChan() {
-			b.Errorf("Unexpected error: %v", err)
-		}
-	}()
+	// 获取数据通道
+	dataChan := pipeline.DataChan()
 
 	b.ResetTimer()
+	b.ReportAllocs()
 
-	// 基准测试主循环
+	// 测量纯数据发送性能
 	for i := 0; i < b.N; i++ {
-		if err := pipeline.Add(ctx, TestData{
-			Name:    fmt.Sprintf("name:%d", i),
-			Address: "Some address string",
-			Age:     20,
-		}); err != nil {
-			b.Errorf("Failed to add item: %v", err)
-			break
+		dataChan <- TestData{
+			Name:    "BenchUser",
+			Address: "BenchAddress",
+			Age:     25,
 		}
 	}
 
 	b.StopTimer()
+
+	// 关闭通道并等待处理完成
+	close(dataChan)
+
+	// 等待所有数据被处理（带超时）
+	timeout := time.After(time.Second * 10)
+	for atomic.LoadInt64(&processedCount) < int64(b.N) {
+		select {
+		case <-timeout:
+			b.Fatalf("Timeout waiting for processing completion. Processed: %d, Expected: %d",
+				atomic.LoadInt64(&processedCount), b.N)
+		default:
+			time.Sleep(time.Millisecond * 1)
+		}
+	}
+
+	cancel()
 }
 
-func BenchmarkCustomStandardPipelineAsyncPerform(b *testing.B) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+// BenchmarkPipelineLatency 测试管道的处理延迟
+func BenchmarkPipelineLatency(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var processedCount int
-	var mux sync.Mutex
+	processed := make(chan struct{}, b.N)
 
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			BufferSize:    128,
-			FlushSize:     256,
-			FlushInterval: time.Millisecond * 100,
+			BufferSize:    1, // 最小缓冲，测试延迟
+			FlushSize:     1, // 立即处理
+			FlushInterval: time.Microsecond * 1,
 		},
 		func(ctx context.Context, batchData []TestData) error {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				// 模拟处理时间
-				time.Sleep(time.Millisecond * 10)
-				mux.Lock()
-				processedCount += len(batchData)
-				for i := range batchData {
-					batchData[i].Age = batchData[i].Age + 1
+			// 每处理一个数据就发送信号
+			for range batchData {
+				select {
+				case processed <- struct{}{}:
+				case <-ctx.Done():
+					return nil
 				}
-				mux.Unlock()
 			}
 			return nil
 		})
-	defer pipeline.Close()
 
-	// 启动异步处理
-	go func() {
-		if err := pipeline.AsyncPerform(ctx); err != nil {
-			b.Log(err)
-		}
-	}()
-
-	// 监听错误
-	go func() {
-		for err := range pipeline.ErrorChan() {
-			b.Errorf("Unexpected error: %v", err)
-		}
-	}()
+	go pipeline.AsyncPerform(ctx)
+	dataChan := pipeline.DataChan()
 
 	b.ResetTimer()
 
-	// 基准测试主循环
+	// 测量端到端延迟
 	for i := 0; i < b.N; i++ {
-		if err := pipeline.Add(ctx, TestData{
-			Name:    fmt.Sprintf("name:%d", i),
-			Address: "Some address string",
-			Age:     20,
-		}); err != nil {
-			b.Errorf("Failed to add item: %v", err)
-			break
+		start := time.Now()
+
+		dataChan <- TestData{
+			Name:    "LatencyTest",
+			Address: "TestAddr",
+			Age:     30,
 		}
+
+		<-processed // 等待处理完成
+
+		duration := time.Since(start)
+		b.ReportMetric(float64(duration.Nanoseconds()), "ns/item")
 	}
 
 	b.StopTimer()
+	close(dataChan)
+	cancel()
 }
 
-func BenchmarkDefaultStandardPipelineSyncPerform(b *testing.B) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-	defer cancel()
+// BenchmarkPipelineBatchEfficiency 测试不同批次大小的效率
+func BenchmarkPipelineBatchEfficiency(b *testing.B) {
+	batchSizes := []int{1, 10, 50, 100, 500, 1000}
 
-	var processedCount int
-	var mux sync.Mutex
-
-	pipeline := gopipeline.NewDefaultStandardPipeline(
-		func(ctx context.Context, batchData []TestData) error {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				// 模拟处理时间
-				time.Sleep(time.Millisecond * 10)
-				mux.Lock()
-				processedCount += len(batchData)
-				for i := range batchData {
-					batchData[i].Age = batchData[i].Age + 1
-				}
-				mux.Unlock()
-			}
-			return nil
-		})
-	defer pipeline.Close()
-
-	// 启动同步处理
-	go func() {
-		if err := pipeline.SyncPerform(ctx); err != nil {
-			b.Log(err)
-		}
-	}()
-
-	// 监听错误
-	go func() {
-		for err := range pipeline.ErrorChan() {
-			b.Errorf("Unexpected error: %v", err)
-		}
-	}()
-
-	b.ResetTimer()
-
-	// 基准测试主循环
-	for i := 0; i < b.N; i++ {
-		if err := pipeline.Add(ctx, TestData{
-			Name:    fmt.Sprintf("name:%d", i),
-			Address: "Some address string",
-			Age:     20,
-		}); err != nil {
-			b.Errorf("Failed to add item: %v", err)
-			break
-		}
-	}
-
-	b.StopTimer()
-}
-
-func BenchmarkCustomStandardPipelineSyncPerform(b *testing.B) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-	defer cancel()
-
-	var processedCount int
-	var mux sync.Mutex
-
-	pipeline := gopipeline.NewStandardPipeline(
-		gopipeline.PipelineConfig{
-			BufferSize:    512,
-			FlushSize:     1024,
-			FlushInterval: time.Millisecond * 100,
-		},
-		func(ctx context.Context, batchData []TestData) error {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				// 模拟处理时间
-				time.Sleep(time.Millisecond * 10)
-				mux.Lock()
-				processedCount += len(batchData)
-				for i := range batchData {
-					batchData[i].Age = batchData[i].Age + 1
-				}
-				mux.Unlock()
-			}
-			return nil
-		})
-	defer pipeline.Close()
-
-	// 启动同步处理
-	go func() {
-		if err := pipeline.SyncPerform(ctx); err != nil {
-			b.Log(err)
-		}
-	}()
-
-	// 监听错误
-	go func() {
-		for err := range pipeline.ErrorChan() {
-			b.Errorf("Unexpected error: %v", err)
-		}
-	}()
-
-	b.ResetTimer()
-
-	// 基准测试主循环
-	for i := 0; i < b.N; i++ {
-		if err := pipeline.Add(ctx, TestData{
-			Name:    fmt.Sprintf("name:%d", i),
-			Address: "Some address string",
-			Age:     20,
-		}); err != nil {
-			b.Errorf("Failed to add item: %v", err)
-			break
-		}
-	}
-
-	b.StopTimer()
-}
-
-// BenchmarkPipelineComparison 比较不同配置下的性能
-func BenchmarkPipelineComparison(b *testing.B) {
-	configs := []struct {
-		name   string
-		config gopipeline.PipelineConfig
-	}{
-		{
-			name: "Small",
-			config: gopipeline.PipelineConfig{
-				BufferSize:    32,
-				FlushSize:     64,
-				FlushInterval: time.Millisecond * 50,
-			},
-		},
-		{
-			name: "Medium",
-			config: gopipeline.PipelineConfig{
-				BufferSize:    128,
-				FlushSize:     256,
-				FlushInterval: time.Millisecond * 100,
-			},
-		},
-		{
-			name: "Large",
-			config: gopipeline.PipelineConfig{
-				BufferSize:    512,
-				FlushSize:     1024,
-				FlushInterval: time.Millisecond * 200,
-			},
-		},
-	}
-
-	for _, cfg := range configs {
-		b.Run(cfg.name, func(b *testing.B) {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	for _, batchSize := range batchSizes {
+		b.Run(fmt.Sprintf("BatchSize%d", batchSize), func(b *testing.B) {
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			var processedCount int
-			var mux sync.Mutex
+			var processedCount int64
+			var batchCount int64
 
 			pipeline := gopipeline.NewStandardPipeline(
-				cfg.config,
+				gopipeline.PipelineConfig{
+					BufferSize:    uint32(batchSize * 2),
+					FlushSize:     uint32(batchSize),
+					FlushInterval: time.Millisecond * 10,
+				},
 				func(ctx context.Context, batchData []TestData) error {
-					select {
-					case <-ctx.Done():
-						return nil
-					default:
-						// 模拟处理时间
-						time.Sleep(time.Microsecond * 100)
-						mux.Lock()
-						processedCount += len(batchData)
-						for i := range batchData {
-							batchData[i].Age = batchData[i].Age + 1
-						}
-						mux.Unlock()
-					}
+					atomic.AddInt64(&processedCount, int64(len(batchData)))
+					atomic.AddInt64(&batchCount, 1)
 					return nil
 				})
-			defer pipeline.Close()
 
-			// 启动异步处理
-			go func() {
-				if err := pipeline.AsyncPerform(ctx); err != nil {
-					b.Log(err)
-				}
-			}()
-
-			// 监听错误
-			go func() {
-				for err := range pipeline.ErrorChan() {
-					b.Errorf("Unexpected error: %v", err)
-				}
-			}()
+			go pipeline.AsyncPerform(ctx)
+			dataChan := pipeline.DataChan()
 
 			b.ResetTimer()
 
-			// 基准测试主循环
+			// 发送数据
 			for i := 0; i < b.N; i++ {
-				if err := pipeline.Add(ctx, TestData{
-					Name:    fmt.Sprintf("name:%d", i),
-					Address: "Some address string",
-					Age:     20,
-				}); err != nil {
-					b.Errorf("Failed to add item: %v", err)
-					break
+				dataChan <- TestData{
+					Name:    "BatchTest",
+					Address: "BatchAddr",
+					Age:     35,
 				}
 			}
 
 			b.StopTimer()
+
+			close(dataChan)
+			cancel()
+
+			// 等待处理完成（带超时）
+			timeout := time.After(time.Second * 5)
+			for atomic.LoadInt64(&processedCount) < int64(b.N) {
+				select {
+				case <-timeout:
+					b.Fatalf("Timeout waiting for processing completion. Processed: %d, Expected: %d",
+						atomic.LoadInt64(&processedCount), b.N)
+				default:
+					time.Sleep(time.Millisecond * 1)
+				}
+			}
+
+			// 报告批次效率指标
+			finalBatchCount := atomic.LoadInt64(&batchCount)
+			if finalBatchCount > 0 {
+				avgBatchSize := float64(b.N) / float64(finalBatchCount)
+				b.ReportMetric(avgBatchSize, "items/batch")
+				b.ReportMetric(float64(finalBatchCount), "total_batches")
+			}
+		})
+	}
+}
+
+// BenchmarkPipelineMemoryEfficiency 测试内存使用效率
+func BenchmarkPipelineMemoryEfficiency(b *testing.B) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var processedCount int64
+
+	pipeline := gopipeline.NewStandardPipeline(
+		gopipeline.PipelineConfig{
+			BufferSize:    100,
+			FlushSize:     50,
+			FlushInterval: time.Millisecond * 5,
+		},
+		func(ctx context.Context, batchData []TestData) error {
+			// 模拟一些内存操作
+			result := make([]string, len(batchData))
+			for i, data := range batchData {
+				result[i] = fmt.Sprintf("%s-%s-%d", data.Name, data.Address, data.Age)
+			}
+			atomic.AddInt64(&processedCount, int64(len(batchData)))
+			return nil
+		})
+
+	go pipeline.AsyncPerform(ctx)
+	dataChan := pipeline.DataChan()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		dataChan <- TestData{
+			Name:    fmt.Sprintf("User%d", i%1000),
+			Address: fmt.Sprintf("Addr%d", i%500),
+			Age:     uint(20 + i%50),
+		}
+	}
+
+	b.StopTimer()
+
+	close(dataChan)
+	cancel()
+
+	for atomic.LoadInt64(&processedCount) < int64(b.N) {
+		time.Sleep(time.Microsecond * 100)
+	}
+}
+
+// BenchmarkPipelineAsyncVsSync 比较异步和同步处理性能
+func BenchmarkPipelineAsyncVsSync(b *testing.B) {
+	modes := []struct {
+		name  string
+		async bool
+	}{
+		{"Async", true},
+		{"Sync", false},
+	}
+
+	for _, mode := range modes {
+		b.Run(mode.name, func(b *testing.B) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var processedCount int64
+
+			pipeline := gopipeline.NewStandardPipeline(
+				gopipeline.PipelineConfig{
+					BufferSize:    200,
+					FlushSize:     100,
+					FlushInterval: time.Millisecond * 10,
+				},
+				func(ctx context.Context, batchData []TestData) error {
+					// 模拟一些计算工作
+					sum := 0
+					for _, data := range batchData {
+						sum += int(data.Age)
+					}
+					atomic.AddInt64(&processedCount, int64(len(batchData)))
+					return nil
+				})
+
+			if mode.async {
+				go pipeline.AsyncPerform(ctx)
+			} else {
+				go pipeline.SyncPerform(ctx)
+			}
+
+			dataChan := pipeline.DataChan()
+
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				dataChan <- TestData{
+					Name:    "PerfTest",
+					Address: "PerfAddr",
+					Age:     uint(25 + i%20),
+				}
+			}
+
+			b.StopTimer()
+
+			close(dataChan)
+			cancel()
+
+			for atomic.LoadInt64(&processedCount) < int64(b.N) {
+				time.Sleep(time.Microsecond * 100)
+			}
+		})
+	}
+}
+
+// BenchmarkPipelineConcurrentProducers 测试多生产者场景
+func BenchmarkPipelineConcurrentProducers(b *testing.B) {
+	producerCounts := []int{1, 2, 4, 8}
+
+	for _, producerCount := range producerCounts {
+		b.Run(fmt.Sprintf("Producers%d", producerCount), func(b *testing.B) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var processedCount int64
+
+			pipeline := gopipeline.NewStandardPipeline(
+				gopipeline.PipelineConfig{
+					BufferSize:    500,
+					FlushSize:     100,
+					FlushInterval: time.Millisecond * 5,
+				},
+				func(ctx context.Context, batchData []TestData) error {
+					atomic.AddInt64(&processedCount, int64(len(batchData)))
+					return nil
+				})
+
+			go pipeline.AsyncPerform(ctx)
+			dataChan := pipeline.DataChan()
+
+			b.ResetTimer()
+
+			// 启动多个生产者
+			var wg sync.WaitGroup
+			itemsPerProducer := b.N / producerCount
+
+			for p := 0; p < producerCount; p++ {
+				wg.Add(1)
+				go func(producerID int) {
+					defer wg.Done()
+					for i := 0; i < itemsPerProducer; i++ {
+						dataChan <- TestData{
+							Name:    fmt.Sprintf("Producer%d-Item%d", producerID, i),
+							Address: "ConcurrentAddr",
+							Age:     uint(20 + i%30),
+						}
+					}
+				}(p)
+			}
+
+			wg.Wait()
+
+			b.StopTimer()
+
+			close(dataChan)
+			cancel()
+
+			expectedItems := itemsPerProducer * producerCount
+			for atomic.LoadInt64(&processedCount) < int64(expectedItems) {
+				time.Sleep(time.Microsecond * 100)
+			}
 		})
 	}
 }

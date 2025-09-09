@@ -22,28 +22,30 @@ go get github.com/rushairer/go-pipeline/v2
 - **错误处理**: 完善的错误处理和传播机制
 - **两种模式**: 标准批处理和去重批处理
 - **同步/异步**: 支持同步和异步执行模式
+- **遵循Go惯例**: 采用"谁写谁关闭"的通道管理原则
 
 ## 📁 项目结构
 
 ```
 v2/
-├── config.go                    # 配置定义
-├── errors.go                    # 错误定义
-├── interface.go                 # 接口定义
-├── pipeline_impl.go             # 通用管道实现
-├── pipeline_standard.go         # 标准管道实现
-├── pipeline_deduplication.go    # 去重管道实现
-├── pipeline_standard_test.go    # 单元测试
-└── pipeline_standard_benchmark_test.go  # 基准测试
+├── config.go                           # 配置定义
+├── errors.go                           # 错误定义
+├── interface.go                        # 接口定义
+├── pipeline_impl.go                    # 通用管道实现
+├── pipeline_standard.go                # 标准管道实现
+├── pipeline_deduplication.go           # 去重管道实现
+├── pipeline_standard_test.go           # 单元测试
+├── pipeline_standard_benchmark_test.go # 基准测试
+└── pipeline_performance_benchmark_test.go # 性能基准测试
 ```
 
 ## 📦 核心组件
 
 ### 接口定义
 
+- **`PipelineChannel[T]`**: 定义管道通道访问接口
+- **`Performer`**: 定义执行管道操作的接口
 - **`DataProcessor[T]`**: 定义批处理数据的核心接口
-- **`DataAdder[T]`**: 定义向管道添加数据的接口  
-- **`Performer[T]`**: 定义执行管道操作的接口
 - **`Pipeline[T]`**: 组合所有管道功能的通用接口
 
 ### 实现类型
@@ -120,11 +122,19 @@ graph TD
 
 ```go
 type PipelineConfig struct {
-    BufferSize    uint32        // 缓冲通道的容量 (默认: 64)
-    FlushSize     uint32        // 批处理数据的最大容量 (默认: 32)
-    FlushInterval time.Duration // 定时刷新的时间间隔 (默认: 200μs)
+    BufferSize    uint32        // 缓冲通道的容量 (默认: 100)
+    FlushSize     uint32        // 批处理数据的最大容量 (默认: 50)
+    FlushInterval time.Duration // 定时刷新的时间间隔 (默认: 50ms)
 }
 ```
+
+### 🎯 性能优化的默认值
+
+基于性能基准测试，v2 版本采用了优化的默认配置：
+
+- **BufferSize: 100** - 缓冲区大小，应该 >= FlushSize * 2 以避免阻塞
+- **FlushSize: 50** - 批处理大小，性能测试显示 50 左右为最优
+- **FlushInterval: 50ms** - 刷新间隔，平衡延迟和吞吐量
 
 ## 💡 使用示例
 
@@ -151,7 +161,6 @@ func main() {
             return nil
         },
     )
-    defer pipeline.Close()
     
     ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
     defer cancel()
@@ -163,22 +172,36 @@ func main() {
         }
     }()
     
-    // 监听错误
+    // 监听错误（必须消费错误通道）
+    errorChan := pipeline.ErrorChan(10) // 指定错误通道缓冲区大小
     go func() {
-        for err := range pipeline.ErrorChan() {
-            log.Printf("批处理错误: %v", err)
+        for {
+            select {
+            case err, ok := <-errorChan:
+                if !ok {
+                    return
+                }
+                log.Printf("批处理错误: %v", err)
+            case <-ctx.Done():
+                return
+            }
         }
     }()
     
-    // 添加数据
-    for i := 0; i < 100; i++ {
-        if err := pipeline.Add(ctx, i); err != nil {
-            log.Printf("添加数据失败: %v", err)
-            break
+    // 使用新的 DataChan API 发送数据
+    dataChan := pipeline.DataChan()
+    go func() {
+        defer close(dataChan) // 用户控制通道关闭
+        for i := 0; i < 100; i++ {
+            select {
+            case dataChan <- i:
+            case <-ctx.Done():
+                return
+            }
         }
-    }
+    }()
     
-    time.Sleep(time.Second) // 等待处理完成
+    time.Sleep(time.Second * 2) // 等待处理完成
 }
 ```
 
@@ -217,7 +240,6 @@ func main() {
             return nil
         },
     )
-    defer pipeline.Close()
     
     ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
     defer cancel()
@@ -229,23 +251,45 @@ func main() {
         }
     }()
     
-    // 添加重复数据（会被自动去重）
-    users := []User{
-        {ID: "1", Name: "Alice"},
-        {ID: "2", Name: "Bob"},
-        {ID: "1", Name: "Alice Updated"}, // 会覆盖第一个Alice
-        {ID: "3", Name: "Charlie"},
-        {ID: "2", Name: "Bob Updated"},   // 会覆盖第一个Bob
-    }
-    
-    for _, user := range users {
-        if err := pipeline.Add(ctx, user); err != nil {
-            log.Printf("添加用户失败: %v", err)
-            break
+    // 监听错误
+    errorChan := pipeline.ErrorChan(10)
+    go func() {
+        for {
+            select {
+            case err, ok := <-errorChan:
+                if !ok {
+                    return
+                }
+                log.Printf("批处理错误: %v", err)
+            case <-ctx.Done():
+                return
+            }
         }
-    }
+    }()
     
-    time.Sleep(time.Second) // 等待处理完成
+    // 使用新的 DataChan API 发送数据
+    dataChan := pipeline.DataChan()
+    go func() {
+        defer close(dataChan)
+        
+        users := []User{
+            {ID: "1", Name: "Alice"},
+            {ID: "2", Name: "Bob"},
+            {ID: "1", Name: "Alice Updated"}, // 会覆盖第一个Alice
+            {ID: "3", Name: "Charlie"},
+            {ID: "2", Name: "Bob Updated"},   // 会覆盖第一个Bob
+        }
+        
+        for _, user := range users {
+            select {
+            case dataChan <- user:
+            case <-ctx.Done():
+                return
+            }
+        }
+    }()
+    
+    time.Sleep(time.Second * 2) // 等待处理完成
 }
 ```
 
@@ -254,9 +298,9 @@ func main() {
 ```go
 // 创建自定义配置的管道
 config := gopipeline.PipelineConfig{
-    BufferSize:    100,                    // 缓冲区大小为100
-    FlushSize:     200,                    // 批次大小为200
-    FlushInterval: time.Millisecond * 500, // 500ms定时刷新
+    BufferSize:    200,                    // 缓冲区大小为200
+    FlushSize:     100,                    // 批次大小为100
+    FlushInterval: time.Millisecond * 100, // 100ms定时刷新
 }
 
 pipeline := gopipeline.NewStandardPipeline(config, 
@@ -337,7 +381,12 @@ func createAdaptivePipeline() *gopipeline.StandardPipeline[Task] {
 
 func getOptimalBufferSize() uint32 {
     // 根据系统内存和CPU核心数计算
-    return uint32(runtime.NumCPU() * 32)
+    return uint32(runtime.NumCPU() * 50)
+}
+
+func getOptimalFlushSize() uint32 {
+    // 基于性能测试，50左右为最优
+    return 50
 }
 ```
 
@@ -411,20 +460,28 @@ func gracefulShutdown(pipeline *gopipeline.StandardPipeline[Task]) {
     defer cancel()
     
     // 停止接收新数据
-    // ... 停止数据生产者
+    // 关闭数据通道
+    dataChan := pipeline.DataChan()
+    close(dataChan)
     
     // 等待处理完成
     done := make(chan struct{})
     go func() {
         defer close(done)
         // 等待错误通道关闭，表示所有数据已处理
-        for range pipeline.ErrorChan() {
-            // 处理剩余错误
+        errorChan := pipeline.ErrorChan(10)
+        for {
+            select {
+            case err, ok := <-errorChan:
+                if !ok {
+                    return
+                }
+                log.Printf("处理剩余错误: %v", err)
+            case <-ctx.Done():
+                return
+            }
         }
     }()
-    
-    // 关闭管道
-    pipeline.Close()
     
     // 等待完成或超时
     select {
@@ -438,21 +495,45 @@ func gracefulShutdown(pipeline *gopipeline.StandardPipeline[Task]) {
 
 ## ⚡ 性能特点
 
-- **高吞吐量**: 批处理机制减少系统调用次数
-- **低延迟**: 可配置的定时刷新确保数据及时处理
-- **内存高效**: 固定大小的缓冲区避免内存泄漏
-- **并发安全**: 内置锁机制保证线程安全
-- **错误隔离**: 单个批次错误不影响整体处理流程
+基于最新的性能基准测试结果：
+
+### 🚀 核心性能指标
+
+- **数据处理吞吐量**: ~248 纳秒/项 (Apple M4)
+- **内存效率**: 232 字节/操作，7 次分配/操作
+- **批处理优化**: 批次大小从 1 到 50，性能提升 5 倍
+- **管道开销**: 比直接处理慢约 38%（225.4 vs 162.7 ns/op）
+
+### 📊 批次大小性能对比
+
+```
+BatchSize1:   740.5 ns/op  (最慢 - 频繁刷新)
+BatchSize10:  251.5 ns/op  (显著改善)
+BatchSize50:  146.5 ns/op  (最优性能) ⭐
+BatchSize100: 163.4 ns/op  (略有下降)
+BatchSize500: 198.6 ns/op  (批次过大)
+```
+
+### 💡 性能优化建议
+
+1. **最优批次大小**: 50 左右
+2. **缓冲区配置**: BufferSize >= FlushSize * 2
+3. **刷新间隔**: 50ms 平衡延迟和吞吐量
+4. **异步模式**: 推荐使用异步处理获得更好性能
 
 ## ⚠️ 重要提醒
 
-> **必须消费错误通道**: 务必监听 `ErrorChan()` 返回的错误通道，否则可能导致 goroutine 阻塞和内存泄漏。框架内部使用非阻塞发送机制，当错误通道满时会丢弃错误并记录日志。
+> **错误通道是可选的**: v2 版本支持可选的错误处理机制。如果不调用 `ErrorChan(size int)`，管道会安全地跳过错误处理，不会导致 panic。
+
+> **推荐监听错误通道**: 如果调用了 `ErrorChan(size int)`，建议监听错误通道并使用 select 语句避免无限等待。
+
+> **通道管理**: v2 版本遵循"谁写谁关闭"原则，用户需要控制 `DataChan()` 的关闭时机。
 
 ## 🔧 最佳实践
 
-1. **合理设置批次大小**: 根据业务场景平衡吞吐量和延迟
-2. **⚠️ 必须监听错误通道**: 及时处理批处理过程中的错误，避免 goroutine 阻塞
-3. **正确关闭管道**: 使用defer确保资源正确释放，`Close()` 方法无需参数
+1. **合理设置批次大小**: 根据性能测试，推荐使用 50 左右的批次大小
+2. **⚠️ 必须监听错误通道**: 使用 select 语句避免阻塞，及时处理批处理过程中的错误
+3. **正确关闭数据通道**: 使用 defer close(dataChan) 确保通道正确关闭
 4. **上下文管理**: 使用context控制管道生命周期
 5. **去重键设计**: 确保去重键的唯一性和稳定性
 6. **性能调优**: 根据基准测试结果选择合适的配置参数
@@ -467,20 +548,50 @@ func gracefulShutdown(pipeline *gopipeline.StandardPipeline[Task]) {
 
 ### 错误通道机制
 
-- 通过`ErrorChan()`方法可以监听所有批处理过程中的错误
-- 错误通道使用非阻塞发送，避免 goroutine 阻塞
-- 当错误通道满时，新错误会被丢弃并记录日志
-- **重要**: 必须有 goroutine 消费错误通道，否则可能导致内存泄漏
+v2 版本提供了**可选的错误处理机制**，具有以下特点：
 
+#### 🛡️ 安全机制
+
+- **可选调用**: `ErrorChan(size int)` 方法是可选的，不调用不会导致 panic
+- **安全跳过**: 如果未调用 `ErrorChan()`，错误会被安全地忽略
+- **非阻塞发送**: 使用非阻塞机制发送错误，避免管道阻塞
+- **缓冲区满处理**: 当错误通道缓冲区满时，新错误会被丢弃而不是阻塞
+
+#### 📋 使用方式
+
+**方式一：监听错误（推荐）**
 ```go
-// 正确的错误处理方式
+// 创建错误通道并监听
+errorChan := pipeline.ErrorChan(10) // 指定缓冲区大小
 go func() {
-    for err := range pipeline.ErrorChan() {
-        log.Printf("处理错误: %v", err)
-        // 根据错误类型进行相应处理
+    for {
+        select {
+        case err, ok := <-errorChan:
+            if !ok {
+                return // 通道已关闭
+            }
+            log.Printf("处理错误: %v", err)
+            // 根据错误类型进行相应处理
+        case <-ctx.Done():
+            return // 上下文取消
+        }
     }
 }()
 ```
+
+**方式二：忽略错误（简化使用）**
+```go
+// 不调用 ErrorChan()，错误会被安全地忽略
+pipeline := gopipeline.NewStandardPipeline(config, flushFunc)
+go pipeline.AsyncPerform(ctx)
+// 管道正常运行，错误被安全跳过，不会 panic
+```
+
+#### ⚡ 错误处理性能
+
+- **零开销**: 不调用 `ErrorChan()` 时，错误处理几乎无性能开销
+- **异步处理**: 错误发送在独立 goroutine 中进行，不影响主流程
+- **智能丢弃**: 缓冲区满时自动丢弃错误，保证管道不被阻塞
 
 ## 🧪 测试
 
@@ -493,59 +604,95 @@ go test ./...
 # 运行基准测试
 go test -bench=. ./...
 
-# 运行特定基准测试
-go test -bench=BenchmarkPipelineComparison ./...
+# 运行性能基准测试
+go test -bench=BenchmarkPipelineDataProcessing ./...
+
+# 运行批次效率测试
+go test -bench=BenchmarkPipelineBatchSizes ./...
+
+# 运行内存使用测试
+go test -bench=BenchmarkPipelineMemoryUsage ./...
 ```
 
 ## 📈 性能基准
 
-在 Apple M4 处理器上的基准测试结果：
+在 Apple M4 处理器上的最新基准测试结果：
+
+### 核心性能测试
 
 ```
-BenchmarkDefaultStandardPipelineAsyncPerform-10    	 2479370	       208.1 ns/op
-BenchmarkCustomStandardPipelineAsyncPerform-10     	 1204576	       201.7 ns/op
-BenchmarkDefaultStandardPipelineSyncPerform-10     	    2352	    167757 ns/op
-BenchmarkCustomStandardPipelineSyncPerform-10      	   21385	     11640 ns/op
+BenchmarkPipelineDataProcessing-10                1000    248.2 ns/op    232 B/op    7 allocs/op
+BenchmarkPipelineVsDirectProcessing/Pipeline-10   1000    225.4 ns/op
+BenchmarkPipelineVsDirectProcessing/Direct-10     1000    162.7 ns/op
+BenchmarkPipelineMemoryUsage-10                   1000    232.2 ns/op    510 B/op    9 allocs/op
+```
 
-BenchmarkPipelineComparison/Small-10               	  931314	       229.7 ns/op
-BenchmarkPipelineComparison/Medium-10              	 1244037	       177.5 ns/op
-BenchmarkPipelineComparison/Large-10               	 1355678	       190.1 ns/op
+### 批次大小效率测试
+
+```
+BenchmarkPipelineBatchSizes/BatchSize1-10         500     740.5 ns/op    500.0 items_processed
+BenchmarkPipelineBatchSizes/BatchSize10-10        500     251.5 ns/op    500.0 items_processed
+BenchmarkPipelineBatchSizes/BatchSize50-10        500     146.5 ns/op    500.0 items_processed ⭐
+BenchmarkPipelineBatchSizes/BatchSize100-10       500     163.4 ns/op    500.0 items_processed
+BenchmarkPipelineBatchSizes/BatchSize500-10       500     198.6 ns/op    500.0 items_processed
 ```
 
 ### 性能分析
 
-- **异步模式** 比同步模式快约 50-80 倍
-- **自定义配置** 在同步模式下可显著提升性能
-- **Large 配置** 在异步模式下表现最佳
-- **批处理效率** 随配置优化可达到每秒处理数百万条记录
+- **最优批次大小**: 50 左右，性能提升 5 倍
+- **管道开销**: 约 38%，换取更好的架构和可维护性
+- **内存效率**: 每个数据项约 232-510 字节内存使用
+- **处理能力**: 每秒可处理数百万条记录
 
 ## ❓ 常见问题 (FAQ)
 
 ### Q: 如何选择合适的配置参数？
 
-**A:** 配置选择取决于具体场景：
+**A:** 基于性能测试的配置建议：
 
-- **高吞吐量场景**: 增大 `FlushSize` 和 `BufferSize`
-- **低延迟场景**: 减小 `FlushInterval`
-- **内存受限场景**: 减小 `BufferSize`
+- **高吞吐量场景**: FlushSize=50, BufferSize=100, FlushInterval=50ms
+- **低延迟场景**: FlushSize=10, BufferSize=50, FlushInterval=10ms
+- **内存受限场景**: FlushSize=20, BufferSize=40, FlushInterval=100ms
 - **CPU密集型处理**: 使用异步模式，适当增大缓冲区
 
-### Q: 为什么会出现 "pipeline error channel is full discard error" 日志？
+### Q: v2 版本与 v1 版本的主要区别？
 
-**A:** 这表示错误通道已满，新错误被丢弃。解决方案：
+**A:** v2 版本的重要改进：
 
-1. 确保有 goroutine 在消费错误通道
-2. 增加错误通道的缓冲区大小（通过调整配置参数）
-3. 优化错误处理逻辑，减少错误产生
+1. **移除 Add() 方法**: 改用 DataChan() API，遵循"谁写谁关闭"原则
+2. **错误通道改进**: ErrorChan(size int) 需要指定缓冲区大小
+3. **性能优化**: 基于基准测试优化的默认配置
+4. **更好的生命周期管理**: 用户控制数据通道的关闭时机
 
-### Q: 同步模式和异步模式有什么区别？
+### Q: 为什么要移除 Add() 方法？
 
 **A:** 
 
-- **异步模式** (`AsyncPerform`): 批处理在独立的 goroutine 中执行，不阻塞主流程
-- **同步模式** (`SyncPerform`): 批处理在当前 goroutine 中执行，会阻塞后续操作
+- **违背Go原则**: Add() 方法违背了"谁写谁关闭"的Go语言原则
+- **更好的控制**: DataChan() 让用户完全控制数据发送和通道关闭
+- **更符合惯例**: 这是标准的Go通道使用模式
 
-一般推荐使用异步模式以获得更好的性能。
+### Q: 如何从 v1 迁移到 v2？
+
+**A:** 迁移步骤：
+
+```go
+// v1 方式
+pipeline.Add(ctx, data)
+
+// v2 方式
+dataChan := pipeline.DataChan()
+go func() {
+    defer close(dataChan)
+    for _, data := range dataList {
+        select {
+        case dataChan <- data:
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+```
 
 ### Q: 如何处理批处理函数中的 panic？
 
@@ -564,14 +711,6 @@ func(ctx context.Context, batchData []Task) error {
 }
 ```
 
-### Q: 可以在运行时动态修改配置吗？
-
-**A:** 当前版本不支持运行时修改配置。如需动态调整，建议：
-
-1. 创建新的管道实例
-2. 优雅关闭旧管道
-3. 切换到新管道
-
 ## 🔧 故障排除
 
 ### 内存泄漏
@@ -579,38 +718,48 @@ func(ctx context.Context, batchData []Task) error {
 **症状**: 内存使用持续增长
 **原因**: 
 - 错误通道未被消费
-- 管道未正确关闭
+- 数据通道未正确关闭
 - 批处理函数中存在内存泄漏
 
 **解决方案**:
 ```go
 // 确保错误通道被消费
+errorChan := pipeline.ErrorChan(10)
 go func() {
-    for err := range pipeline.ErrorChan() {
-        // 处理错误
+    for {
+        select {
+        case err, ok := <-errorChan:
+            if !ok {
+                return
+            }
+            // 处理错误
+        case <-ctx.Done():
+            return
+        }
     }
 }()
 
-// 确保管道被关闭
-defer pipeline.Close()
+// 确保数据通道被关闭
+dataChan := pipeline.DataChan()
+defer close(dataChan)
 ```
 
 ### 性能问题
 
 **症状**: 处理速度慢于预期
 **排查步骤**:
-1. 检查配置参数是否合理
-2. 使用基准测试对比不同配置
-3. 检查批处理函数的执行时间
-4. 考虑使用异步模式
+1. 检查批次大小是否为 50 左右
+2. 确保 BufferSize >= FlushSize * 2
+3. 使用异步模式
+4. 检查批处理函数的执行时间
 
 **优化建议**:
 ```go
-// 使用更大的批次和缓冲区
+// 使用性能优化的配置
 config := gopipeline.PipelineConfig{
-    BufferSize:    512,
-    FlushSize:     1024,
-    FlushInterval: time.Millisecond * 100,
+    BufferSize:    100,                   // >= FlushSize * 2
+    FlushSize:     50,                    // 最优批次大小
+    FlushInterval: time.Millisecond * 50, // 平衡延迟和吞吐量
 }
 ```
 
@@ -619,7 +768,7 @@ config := gopipeline.PipelineConfig{
 **症状**: 部分数据未被处理
 **原因**:
 - 上下文被过早取消
-- 管道被过早关闭
+- 数据通道被过早关闭
 - 批处理函数返回错误但未处理
 
 **解决方案**:
@@ -628,8 +777,18 @@ config := gopipeline.PipelineConfig{
 ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 defer cancel()
 
-// 实现优雅关闭
-gracefulShutdown(pipeline)
+// 确保所有数据发送完成后再关闭通道
+dataChan := pipeline.DataChan()
+go func() {
+    defer close(dataChan) // 在所有数据发送完成后关闭
+    for _, data := range allData {
+        select {
+        case dataChan <- data:
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
 ```
 
 ## 📄 许可证
