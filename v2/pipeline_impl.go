@@ -18,10 +18,10 @@ type PipelineImpl[T any] struct {
 	errorChan chan error
 }
 
-// 确保 StandardPipeline 实现了 Performer 接口
+// 确保 PipelineImpl 实现了 Performer 接口
 var _ Performer[any] = (*PipelineImpl[any])(nil)
 
-// 确保 StandardPipeline 实现了 PipelineChannel 接口
+// 确保 PipelineImpl 实现了 PipelineChannel 接口
 var _ PipelineChannel[any] = (*PipelineImpl[any])(nil)
 
 // NewPipelineImpl 创建一个新的基础管道实现实例
@@ -165,12 +165,20 @@ func (p *PipelineImpl[T]) safeErrorSend(err error) {
 	}()
 }
 
-// 让调用方直接监听内部 errorChan
+// ErrorChan 返回一个只读的错误通道，用于接收管道处理过程中的错误
+// 参数:
+//   - size: 错误通道的缓冲区大小，如果为0则使用自动计算的默认大小
+//
+// 返回值: 返回一个只读的错误通道
+//
+// 注意: 这是一个可选的方法调用。如果不调用此方法，错误会被安全地忽略
+// 如果调用此方法，建议监听错误通道并使用select语句避免无限等待
 func (p *PipelineImpl[T]) ErrorChan(size int) <-chan error {
 	if p.errorChan != nil {
 		return p.errorChan
 	}
 	if size == 0 {
+		// 自动计算合理的缓冲区大小
 		p.errorChan = make(chan error, int((p.config.FlushSize+p.config.BufferSize-1)/p.config.BufferSize))
 	} else {
 		p.errorChan = make(chan error, size)
