@@ -32,31 +32,29 @@ func TestStandardPipelineAsyncPerform(t *testing.T) {
 		})
 	defer pipeline.Close()
 
-	go pipeline.AsyncPerform(ctx)
-
-	// Add some data
+	// 启动异步处理
 	go func() {
-		for i := 0; i < 6478017; i++ {
-			if err := pipeline.Add(ctx, i); err != nil {
-				t.Errorf("Failed to add item: %v", err)
-			}
+		if err := pipeline.AsyncPerform(ctx); err != nil {
+			t.Log(err)
 		}
 	}()
 
-	for {
-		select {
-		case err, ok := <-pipeline.ErrorChan():
-			if ok {
-				t.Errorf("Expected no error, got %v", err)
-			} else {
-				goto validation
-			}
-		case <-ctx.Done():
-			goto validation
+	// 监听错误
+	go func() {
+		for err := range pipeline.ErrorChan() {
+			t.Errorf("Expected no error, got %v", err)
+		}
+	}()
+
+	// 添加数据
+	for i := 0; i < 6478017; i++ {
+		if err := pipeline.Add(ctx, i); err != nil {
+			t.Errorf("Failed to add item: %v", err)
 		}
 	}
 
-validation:
+	<-ctx.Done()
+
 	if processedCount != 6478017 {
 		t.Errorf("Expected 6478017 processed items, got %d", processedCount)
 	}
@@ -68,10 +66,11 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 	defer cancel()
 
 	var processedCount int
+	var errorCount int
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			FlushSize:     32,
-			BufferSize:    64,
+			BufferSize:    32,
+			FlushSize:     64,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []int) error {
@@ -90,37 +89,41 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 		})
 	defer pipeline.Close()
 
-	go pipeline.AsyncPerform(ctx)
-
-	// Add some data
+	// 启动异步处理
 	go func() {
-		for i := 0; i < 6478017; i++ {
-			if err := pipeline.Add(ctx, i); err != nil {
-				t.Errorf("Failed to add item: %v", err)
+		if err := pipeline.AsyncPerform(ctx); err != nil {
+			t.Log(err)
+		}
+	}()
+
+	// 监听错误
+	go func() {
+		for err := range pipeline.ErrorChan() {
+			if e, ok := err.(errorWithData); ok {
+				if e.Err.Error() != "test error" {
+					t.Errorf("Expected 'test error', got %v", e.Err.Error())
+				}
+				mux.Lock()
+				errorCount++
+				mux.Unlock()
 			}
 		}
 	}()
 
-	for {
-		select {
-		case err, ok := <-pipeline.ErrorChan():
-			if ok {
-				if e, ok := err.(errorWithData); ok {
-					if e.Err.Error() != "test error" {
-						t.Errorf("Expected error, got nil")
-					}
-				}
-			} else {
-				goto validation
-			}
-		case <-ctx.Done():
-			goto validation
+	// 添加数据
+	for i := 0; i < 6478017; i++ {
+		if err := pipeline.Add(ctx, i); err != nil {
+			t.Errorf("Failed to add item: %v", err)
 		}
 	}
 
-validation:
+	<-ctx.Done()
+
 	if processedCount != 6478017 {
 		t.Errorf("Expected 6478017 processed items, got %d", processedCount)
+	}
+	if errorCount == 0 {
+		t.Errorf("Expected some errors, got %d", errorCount)
 	}
 }
 
@@ -132,15 +135,16 @@ func TestStandardPipelineAsyncPerformTimeout(t *testing.T) {
 	var processedCount int
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			FlushSize:     32,
-			BufferSize:    64,
+			BufferSize:    32,
+			FlushSize:     64,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []int) error {
 			select {
 			case <-ctx.Done():
+				return nil
 			default:
-				// SyncPerform 是有序的，即使sleep也不影响
+				// 长时间sleep模拟超时场景
 				time.Sleep(time.Second * 6)
 				mux.Lock()
 				processedCount += len(batchData)
@@ -151,39 +155,36 @@ func TestStandardPipelineAsyncPerformTimeout(t *testing.T) {
 		})
 	defer pipeline.Close()
 
-	go pipeline.AsyncPerform(ctx)
-
-	// Add some data
+	// 启动异步处理
 	go func() {
-		for i := 0; i < 6478017; i++ {
-			if err := pipeline.Add(ctx, i); err != nil {
-				if errors.Is(err, gopipeline.ErrContextIsClosed) {
-					t.Log("gopipeline.ErrContextIsClosed", err)
-					break
-				} else if errors.Is(err, gopipeline.ErrChannelIsClosed) {
-					t.Log("gopipeline.ErrChannelIsClosed", err)
-				} else {
-					t.Errorf("Failed to add item: %v", err)
-				}
-			}
+		if err := pipeline.AsyncPerform(ctx); err != nil {
+			t.Log(err)
 		}
 	}()
 
-	for {
+	// 监听错误
+	go func() {
+		for err := range pipeline.ErrorChan() {
+			t.Errorf("Expected no error, got %v", err)
+		}
+	}()
 
-		select {
-		case err, ok := <-pipeline.ErrorChan():
-			if ok {
-				t.Errorf("Expected no error, got %v", err)
+	// 添加数据
+	for i := 0; i < 6478017; i++ {
+		if err := pipeline.Add(ctx, i); err != nil {
+			if errors.Is(err, gopipeline.ErrContextIsClosed) {
+				t.Log("gopipeline.ErrContextIsClosed", err)
+				break
+			} else if errors.Is(err, gopipeline.ErrChannelIsClosed) {
+				t.Log("gopipeline.ErrChannelIsClosed", err)
 			} else {
-				goto validation
+				t.Errorf("Failed to add item: %v", err)
 			}
-		case <-ctx.Done():
-			goto validation
 		}
 	}
 
-validation:
+	<-ctx.Done()
+
 	if processedCount == 6478017 {
 		t.Errorf("Expected less than 6478017 processed items, got %d", processedCount)
 	}
@@ -197,13 +198,14 @@ func TestStandardPipelineSyncPerform(t *testing.T) {
 	var processedCount int
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			FlushSize:     32,
-			BufferSize:    64,
+			BufferSize:    32,
+			FlushSize:     64,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []int) error {
 			select {
 			case <-ctx.Done():
+				return nil
 			default:
 				// SyncPerform 是有序的，即使sleep也不影响
 				time.Sleep(time.Millisecond * 10)
@@ -216,31 +218,29 @@ func TestStandardPipelineSyncPerform(t *testing.T) {
 		})
 	defer pipeline.Close()
 
-	go pipeline.SyncPerform(ctx)
-
-	// Add some data
+	// 启动同步处理
 	go func() {
-		for i := 0; i < 2000; i++ {
-			if err := pipeline.Add(ctx, i); err != nil {
-				t.Errorf("Failed to add item: %v", err)
-			}
+		if err := pipeline.SyncPerform(ctx); err != nil {
+			t.Log(err)
 		}
 	}()
 
-	for {
-		select {
-		case err, ok := <-pipeline.ErrorChan():
-			if ok {
-				t.Errorf("Expected no error, got %v", err)
-			} else {
-				goto validation
-			}
-		case <-ctx.Done():
-			goto validation
+	// 监听错误
+	go func() {
+		for err := range pipeline.ErrorChan() {
+			t.Errorf("Expected no error, got %v", err)
+		}
+	}()
+
+	// 添加数据
+	for i := 0; i < 2000; i++ {
+		if err := pipeline.Add(ctx, i); err != nil {
+			t.Errorf("Failed to add item: %v", err)
 		}
 	}
 
-validation:
+	<-ctx.Done()
+
 	if processedCount != 2000 {
 		t.Errorf("Expected 2000 processed items, got %d", processedCount)
 	}
@@ -252,15 +252,17 @@ func TestStandardPipelineSyncPerformWithFlushError(t *testing.T) {
 	defer cancel()
 
 	var processedCount int
+	var errorCount int
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			FlushSize:     32,
-			BufferSize:    64,
+			BufferSize:    32,
+			FlushSize:     64,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []int) error {
 			select {
 			case <-ctx.Done():
+				return nil
 			default:
 				// SyncPerform 是有序的，即使sleep也不影响
 				time.Sleep(time.Millisecond * 10)
@@ -269,60 +271,64 @@ func TestStandardPipelineSyncPerformWithFlushError(t *testing.T) {
 				mux.Unlock()
 				//t.Log(batchData)
 			}
-			return nil
+			return newErrorWithData(batchData, errors.New("test error"))
 		})
 	defer pipeline.Close()
 
-	go pipeline.SyncPerform(ctx)
-
-	// Add some data
+	// 启动同步处理
 	go func() {
-		for i := 0; i < 2000; i++ {
-			if err := pipeline.Add(ctx, i); err != nil {
-				t.Errorf("Failed to add item: %v", err)
+		if err := pipeline.SyncPerform(ctx); err != nil {
+			t.Log(err)
+		}
+	}()
+
+	// 监听错误
+	go func() {
+		for err := range pipeline.ErrorChan() {
+			if e, ok := err.(errorWithData); ok {
+				if e.Err.Error() != "test error" {
+					t.Errorf("Expected 'test error', got %v", e.Err.Error())
+				}
+				mux.Lock()
+				errorCount++
+				mux.Unlock()
 			}
 		}
 	}()
 
-	for {
-		select {
-		case err, ok := <-pipeline.ErrorChan():
-			if ok {
-				if e, ok := err.(errorWithData); ok {
-					if e.Err.Error() != "test error" {
-						t.Errorf("Expected error, got nil")
-					}
-				}
-			} else {
-				goto validation
-			}
-		case <-ctx.Done():
-			goto validation
+	// 添加数据
+	for i := 0; i < 2000; i++ {
+		if err := pipeline.Add(ctx, i); err != nil {
+			t.Errorf("Failed to add item: %v", err)
 		}
 	}
 
-validation:
+	<-ctx.Done()
+
 	if processedCount != 2000 {
 		t.Errorf("Expected 2000 processed items, got %d", processedCount)
+	}
+	if errorCount == 0 {
+		t.Errorf("Expected some errors, got %d", errorCount)
 	}
 }
 
 func TestStandardPipelineSyncPerformTimeout(t *testing.T) {
 	var mux sync.Mutex
-
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
 	var processedCount int
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			FlushSize:     32,
-			BufferSize:    64,
+			BufferSize:    32,
+			FlushSize:     64,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []int) error {
 			select {
 			case <-ctx.Done():
+				return nil
 			default:
 				// SyncPerform 是有序的，即使sleep也不影响
 				time.Sleep(time.Millisecond * 1000)
@@ -335,37 +341,35 @@ func TestStandardPipelineSyncPerformTimeout(t *testing.T) {
 		})
 	defer pipeline.Close()
 
-	go pipeline.SyncPerform(ctx)
-
-	// Add some data
+	// 启动同步处理
 	go func() {
-		for i := 0; i < 2000; i++ {
-			if err := pipeline.Add(ctx, i); err != nil {
-				if errors.Is(err, gopipeline.ErrContextIsClosed) {
-					break
-				} else if errors.Is(err, gopipeline.ErrChannelIsClosed) {
-					t.Log("gopipeline.ErrChannelIsClosed", err)
-				} else {
-					t.Errorf("Failed to add item: %v", err)
-				}
-			}
+		if err := pipeline.SyncPerform(ctx); err != nil {
+			t.Log(err)
 		}
 	}()
 
-	for {
-		select {
-		case err, ok := <-pipeline.ErrorChan():
-			if ok {
-				t.Errorf("Expected no error, got %v", err)
+	// 监听错误
+	go func() {
+		for err := range pipeline.ErrorChan() {
+			t.Errorf("Expected no error, got %v", err)
+		}
+	}()
+
+	// 添加数据
+	for i := 0; i < 2000; i++ {
+		if err := pipeline.Add(ctx, i); err != nil {
+			if errors.Is(err, gopipeline.ErrContextIsClosed) {
+				break
+			} else if errors.Is(err, gopipeline.ErrChannelIsClosed) {
+				t.Log("gopipeline.ErrChannelIsClosed", err)
 			} else {
-				goto validation
+				t.Errorf("Failed to add item: %v", err)
 			}
-		case <-ctx.Done():
-			goto validation
 		}
 	}
 
-validation:
+	<-ctx.Done()
+
 	if processedCount == 2000 {
 		t.Errorf("Expected less than 2000 processed items, got %d", processedCount)
 	}
@@ -373,6 +377,7 @@ validation:
 
 func TestStandardPipelineWhenDataChanIsClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+	defer cancel()
 
 	pipeline := gopipeline.NewDefaultStandardPipeline(
 		func(ctx context.Context, batchData []int) error {
@@ -381,13 +386,27 @@ func TestStandardPipelineWhenDataChanIsClosed(t *testing.T) {
 	)
 	defer pipeline.Close()
 
+	// 启动异步处理
+	go func() {
+		if err := pipeline.AsyncPerform(ctx); err != nil {
+			t.Log(err)
+		}
+	}()
+
+	// 监听错误
+	go func() {
+		for err := range pipeline.ErrorChan() {
+			t.Errorf("Expected no error, got %v", err)
+		}
+	}()
+
+	// 取消上下文
 	cancel()
 
-	pipeline.AsyncPerform(ctx)
+	// 尝试添加数据应该失败
 	if err := pipeline.Add(ctx, 1); err == nil {
 		t.Errorf("Expected ErrChannelIsClosed or ErrContextIsClosed, got %v", err)
 	}
-
 }
 
 type errorWithData struct {

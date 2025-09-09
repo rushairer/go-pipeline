@@ -2,6 +2,7 @@ package gopipeline
 
 import (
 	"context"
+	"log"
 	"time"
 )
 
@@ -38,7 +39,7 @@ func NewPipelineImpl[T any](
 		config:    config,
 		dataChan:  make(chan T, config.BufferSize),
 		processor: processor,
-		errorChan: make(chan error, 1),
+		errorChan: make(chan error, int((config.FlushSize+config.BufferSize-1)/config.BufferSize)),
 	}
 }
 
@@ -162,7 +163,13 @@ func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any)
 	}()
 
 	if err := p.processor.flush(ctx, batchData); err != nil {
-		p.errorChan <- err
+		select {
+		case p.errorChan <- err:
+			// 成功发送错误
+		default:
+			// 通道已满，丢弃错误或记录日志
+			log.Printf("pipeline error channel is full, discard error: %v", err)
+		}
 	}
 }
 
