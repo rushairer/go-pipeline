@@ -38,5 +38,7 @@ jobs:
             
             ## 安装
             ```bash
-            go get github.com/rushairer/go-pipeline@${{ github.ref }}
+            go get github.com/rushairer/go-pipeline/v2@${{ github.ref }}
             ```
+            
+            > **版本说明**: 这是v2版本。如果需要v1版本，请使用 `go get github.com/rushairer/go-pipeline@v1.x.x`
