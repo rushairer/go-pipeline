@@ -10,6 +10,12 @@ import (
 	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
+type BenchmarkTestData struct {
+	Name    string
+	Address string
+	Age     uint
+}
+
 // BenchmarkPipelineDataProcessing 测试管道的纯数据处理性能
 func BenchmarkPipelineDataProcessing(b *testing.B) {
 	var processedCount int64
@@ -21,7 +27,7 @@ func BenchmarkPipelineDataProcessing(b *testing.B) {
 			FlushSize:     100,
 			FlushInterval: time.Millisecond * 10,
 		},
-		func(ctx context.Context, batchData []TestData) error {
+		func(ctx context.Context, batchData []BenchmarkTestData) error {
 			// 模拟真实的数据处理工作
 			for _, data := range batchData {
 				// 简单的字符串操作
@@ -43,7 +49,7 @@ func BenchmarkPipelineDataProcessing(b *testing.B) {
 
 	// 发送数据并测量性能
 	for i := 0; i < b.N; i++ {
-		dataChan <- TestData{
+		dataChan <- BenchmarkTestData{
 			Name:    fmt.Sprintf("User%d", i%1000),
 			Address: fmt.Sprintf("Address%d", i%500),
 			Age:     uint(20 + i%50),
@@ -78,7 +84,7 @@ func BenchmarkPipelineVsDirectProcessing(b *testing.B) {
 				FlushSize:     100,
 				FlushInterval: time.Millisecond * 5,
 			},
-			func(ctx context.Context, batchData []TestData) error {
+			func(ctx context.Context, batchData []BenchmarkTestData) error {
 				for _, data := range batchData {
 					_ = fmt.Sprintf("%s-%s-%d", data.Name, data.Address, data.Age)
 				}
@@ -95,7 +101,7 @@ func BenchmarkPipelineVsDirectProcessing(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			dataChan <- TestData{
+			dataChan <- BenchmarkTestData{
 				Name:    fmt.Sprintf("User%d", i%1000),
 				Address: fmt.Sprintf("Address%d", i%500),
 				Age:     uint(20 + i%50),
@@ -116,7 +122,7 @@ func BenchmarkPipelineVsDirectProcessing(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			data := TestData{
+			data := BenchmarkTestData{
 				Name:    fmt.Sprintf("User%d", i%1000),
 				Address: fmt.Sprintf("Address%d", i%500),
 				Age:     uint(20 + i%50),
@@ -140,7 +146,7 @@ func BenchmarkPipelineBatchSizes(b *testing.B) {
 					FlushSize:     uint32(batchSize),
 					FlushInterval: time.Millisecond * 5,
 				},
-				func(ctx context.Context, batchData []TestData) error {
+				func(ctx context.Context, batchData []BenchmarkTestData) error {
 					// 模拟批处理工作
 					result := make([]string, len(batchData))
 					for i, data := range batchData {
@@ -159,7 +165,7 @@ func BenchmarkPipelineBatchSizes(b *testing.B) {
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				dataChan <- TestData{
+				dataChan <- BenchmarkTestData{
 					Name:    fmt.Sprintf("User%d", i),
 					Address: fmt.Sprintf("Addr%d", i),
 					Age:     uint(20 + i%50),
@@ -193,7 +199,7 @@ func BenchmarkPipelineMemoryUsage(b *testing.B) {
 			FlushSize:     50,
 			FlushInterval: time.Millisecond * 10,
 		},
-		func(ctx context.Context, batchData []TestData) error {
+		func(ctx context.Context, batchData []BenchmarkTestData) error {
 			// 模拟内存密集型操作
 			results := make([]map[string]interface{}, len(batchData))
 			for i, data := range batchData {
@@ -218,7 +224,7 @@ func BenchmarkPipelineMemoryUsage(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		dataChan <- TestData{
+		dataChan <- BenchmarkTestData{
 			Name:    fmt.Sprintf("MemUser%d", i),
 			Address: fmt.Sprintf("MemAddr%d", i),
 			Age:     uint(25 + i%40),

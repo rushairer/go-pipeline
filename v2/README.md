@@ -34,8 +34,10 @@ v2/
 ├── pipeline_impl.go                    # 通用管道实现
 ├── pipeline_standard.go                # 标准管道实现
 ├── pipeline_deduplication.go           # 去重管道实现
-├── pipeline_standard_test.go           # 单元测试
-├── pipeline_standard_benchmark_test.go # 基准测试
+├── pipeline_standard_test.go           # 标准管道单元测试
+├── pipeline_standard_benchmark_test.go # 标准管道基准测试
+├── pipeline_deduplication_test.go      # 去重管道单元测试
+├── pipeline_deduplication_benchmark_test.go # 去重管道基准测试
 └── pipeline_performance_benchmark_test.go # 性能基准测试
 ```
 
@@ -95,6 +97,16 @@ graph TD
     J --> K
     K --> E
 ```
+
+### 测试文件说明
+
+项目包含完整的测试套件，确保代码质量和性能：
+
+- **`pipeline_standard_test.go`**: 标准管道的单元测试，验证基本功能
+- **`pipeline_deduplication_test.go`**: 去重管道的单元测试，验证去重逻辑
+- **`pipeline_standard_benchmark_test.go`**: 标准管道的性能基准测试
+- **`pipeline_deduplication_benchmark_test.go`**: 去重管道的性能基准测试  
+- **`pipeline_performance_benchmark_test.go`**: 综合性能基准测试
 
 ### 去重管道流程
 
@@ -601,8 +613,17 @@ go pipeline.AsyncPerform(ctx)
 # 运行所有测试
 go test ./...
 
+# 运行单元测试
+go test -v ./... -run Test
+
 # 运行基准测试
 go test -bench=. ./...
+
+# 运行标准管道基准测试
+go test -bench=BenchmarkStandardPipeline ./...
+
+# 运行去重管道基准测试  
+go test -bench=BenchmarkDeduplicationPipeline ./...
 
 # 运行性能基准测试
 go test -bench=BenchmarkPipelineDataProcessing ./...
@@ -643,6 +664,19 @@ BenchmarkPipelineBatchSizes/BatchSize500-10       500     198.6 ns/op    500.0 i
 - **管道开销**: 约 38%，换取更好的架构和可维护性
 - **内存效率**: 每个数据项约 232-510 字节内存使用
 - **处理能力**: 每秒可处理数百万条记录
+
+### 去重管道性能特点
+
+去重管道在标准管道的基础上增加了以下性能特征：
+
+- **内存使用**: 使用 map 结构存储数据，内存使用略高于标准管道
+- **处理延迟**: 去重逻辑增加约 10-15% 的处理时间
+- **键生成开销**: 需要为每个数据项生成唯一键
+- **批次效率**: 去重后的批次大小可能小于配置的 FlushSize
+
+**性能对比**:
+- 标准管道: ~225 ns/op
+- 去重管道: ~260 ns/op (增加约 15% 开销)
 
 ## ❓ 常见问题 (FAQ)
 

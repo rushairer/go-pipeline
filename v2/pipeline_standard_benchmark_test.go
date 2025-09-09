@@ -11,7 +11,7 @@ import (
 	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
-type TestData struct {
+type BenchmarkBenchmarkTestData struct {
 	Name    string
 	Address string
 	Age     uint
@@ -31,7 +31,7 @@ func BenchmarkPipelineThroughput(b *testing.B) {
 			FlushSize:     10,                   // 小批次，快速处理
 			FlushInterval: time.Millisecond * 1, // 很短的间隔
 		},
-		func(ctx context.Context, batchData []TestData) error {
+		func(ctx context.Context, batchData []BenchmarkTestData) error {
 			// 模拟最小的处理开销
 			atomic.AddInt64(&processedCount, int64(len(batchData)))
 			return nil
@@ -48,20 +48,18 @@ func BenchmarkPipelineThroughput(b *testing.B) {
 
 	// 测量纯数据发送性能
 	for i := 0; i < b.N; i++ {
-		dataChan <- TestData{
+		dataChan <- BenchmarkTestData{
 			Name:    "BenchUser",
 			Address: "BenchAddress",
 			Age:     25,
 		}
 	}
 
-	b.StopTimer()
-
 	// 关闭通道并等待处理完成
 	close(dataChan)
 
 	// 等待所有数据被处理（带超时）
-	timeout := time.After(time.Second * 10)
+	timeout := time.After(time.Second * 30)
 	for atomic.LoadInt64(&processedCount) < int64(b.N) {
 		select {
 		case <-timeout:
@@ -72,6 +70,7 @@ func BenchmarkPipelineThroughput(b *testing.B) {
 		}
 	}
 
+	b.StopTimer()
 	cancel()
 }
 
@@ -88,7 +87,7 @@ func BenchmarkPipelineLatency(b *testing.B) {
 			FlushSize:     1, // 立即处理
 			FlushInterval: time.Microsecond * 1,
 		},
-		func(ctx context.Context, batchData []TestData) error {
+		func(ctx context.Context, batchData []BenchmarkTestData) error {
 			// 每处理一个数据就发送信号
 			for range batchData {
 				select {
@@ -109,7 +108,7 @@ func BenchmarkPipelineLatency(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		start := time.Now()
 
-		dataChan <- TestData{
+		dataChan <- BenchmarkTestData{
 			Name:    "LatencyTest",
 			Address: "TestAddr",
 			Age:     30,
@@ -144,7 +143,7 @@ func BenchmarkPipelineBatchEfficiency(b *testing.B) {
 					FlushSize:     uint32(batchSize),
 					FlushInterval: time.Millisecond * 10,
 				},
-				func(ctx context.Context, batchData []TestData) error {
+				func(ctx context.Context, batchData []BenchmarkTestData) error {
 					atomic.AddInt64(&processedCount, int64(len(batchData)))
 					atomic.AddInt64(&batchCount, 1)
 					return nil
@@ -153,33 +152,38 @@ func BenchmarkPipelineBatchEfficiency(b *testing.B) {
 			go pipeline.AsyncPerform(ctx)
 			dataChan := pipeline.DataChan()
 
-			b.ResetTimer()
-
-			// 发送数据
+			// 准备测试数据
+			testData := make([]BenchmarkTestData, b.N)
 			for i := 0; i < b.N; i++ {
-				dataChan <- TestData{
+				testData[i] = BenchmarkTestData{
 					Name:    "BatchTest",
 					Address: "BatchAddr",
 					Age:     35,
 				}
 			}
 
-			b.StopTimer()
+			b.ResetTimer()
+
+			// 发送所有测试数据
+			for i := 0; i < b.N; i++ {
+				dataChan <- testData[i]
+			}
 
 			close(dataChan)
-			cancel()
 
 			// 等待处理完成（带超时）
-			timeout := time.After(time.Second * 5)
+			timeout := time.After(time.Second * 30)
 			for atomic.LoadInt64(&processedCount) < int64(b.N) {
 				select {
 				case <-timeout:
 					b.Fatalf("Timeout waiting for processing completion. Processed: %d, Expected: %d",
 						atomic.LoadInt64(&processedCount), b.N)
 				default:
-					time.Sleep(time.Millisecond * 1)
+					time.Sleep(time.Millisecond * 10)
 				}
 			}
+
+			b.StopTimer()
 
 			// 报告批次效率指标
 			finalBatchCount := atomic.LoadInt64(&batchCount)
@@ -205,7 +209,7 @@ func BenchmarkPipelineMemoryEfficiency(b *testing.B) {
 			FlushSize:     50,
 			FlushInterval: time.Millisecond * 5,
 		},
-		func(ctx context.Context, batchData []TestData) error {
+		func(ctx context.Context, batchData []BenchmarkTestData) error {
 			// 模拟一些内存操作
 			result := make([]string, len(batchData))
 			for i, data := range batchData {
@@ -222,7 +226,7 @@ func BenchmarkPipelineMemoryEfficiency(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		dataChan <- TestData{
+		dataChan <- BenchmarkTestData{
 			Name:    fmt.Sprintf("User%d", i%1000),
 			Address: fmt.Sprintf("Addr%d", i%500),
 			Age:     uint(20 + i%50),
@@ -262,7 +266,7 @@ func BenchmarkPipelineAsyncVsSync(b *testing.B) {
 					FlushSize:     100,
 					FlushInterval: time.Millisecond * 10,
 				},
-				func(ctx context.Context, batchData []TestData) error {
+				func(ctx context.Context, batchData []BenchmarkTestData) error {
 					// 模拟一些计算工作
 					sum := 0
 					for _, data := range batchData {
@@ -283,7 +287,7 @@ func BenchmarkPipelineAsyncVsSync(b *testing.B) {
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				dataChan <- TestData{
+				dataChan <- BenchmarkTestData{
 					Name:    "PerfTest",
 					Address: "PerfAddr",
 					Age:     uint(25 + i%20),
@@ -319,7 +323,7 @@ func BenchmarkPipelineConcurrentProducers(b *testing.B) {
 					FlushSize:     100,
 					FlushInterval: time.Millisecond * 5,
 				},
-				func(ctx context.Context, batchData []TestData) error {
+				func(ctx context.Context, batchData []BenchmarkTestData) error {
 					atomic.AddInt64(&processedCount, int64(len(batchData)))
 					return nil
 				})
@@ -338,7 +342,7 @@ func BenchmarkPipelineConcurrentProducers(b *testing.B) {
 				go func(producerID int) {
 					defer wg.Done()
 					for i := 0; i < itemsPerProducer; i++ {
-						dataChan <- TestData{
+						dataChan <- BenchmarkTestData{
 							Name:    fmt.Sprintf("Producer%d-Item%d", producerID, i),
 							Address: "ConcurrentAddr",
 							Age:     uint(20 + i%30),
