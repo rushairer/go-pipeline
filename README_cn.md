@@ -156,6 +156,31 @@ type PipelineConfig struct {
 - **FlushSize: 50** - 批处理大小，性能测试显示 50 左右为最优
 - **FlushInterval: 50ms** - 刷新间隔，平衡延迟和吞吐量
 
+### 使用默认值配置
+
+你可以使用 `NewPipelineConfig()` 函数创建带有默认值的配置，然后自定义特定参数：
+
+```go
+// 创建带有默认值的配置
+config := gopipeline.NewPipelineConfig()
+
+// 直接使用默认值
+pipeline := gopipeline.NewStandardPipeline(config, flushFunc)
+
+// 或者使用链式方法自定义特定参数
+config = gopipeline.NewPipelineConfig().
+    WithFlushInterval(time.Millisecond * 10).
+    WithBufferSize(200)
+
+pipeline = gopipeline.NewStandardPipeline(config, flushFunc)
+```
+
+可用的配置方法：
+- `NewPipelineConfig()` - 创建带有默认值的配置
+- `WithBufferSize(size uint32)` - 设置缓冲区大小
+- `WithFlushSize(size uint32)` - 设置批处理大小
+- `WithFlushInterval(interval time.Duration)` - 设置刷新间隔
+
 ## 💡 使用示例
 
 ### 标准管道示例
