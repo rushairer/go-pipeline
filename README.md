@@ -574,6 +574,8 @@ BatchSize500: 198.6 ns/op  (Batch too large)
 
 > **Channel Management**: v2 version follows the "writer closes" principle, users need to control the closing timing of `DataChan()`.
 
+> **⚠️ Pipeline Reuse Warning**: If you need to reuse the same pipeline instance for multiple runs (calling `SyncPerform()` or `AsyncPerform()` multiple times), **DO NOT close the DataChan** prematurely. `DataChan()` returns the same channel instance, and once closed, it cannot be reused. Use context cancellation or timeout to control pipeline lifecycle instead.
+
 ## 🔧 Best Practices
 
 1. **Reasonable Batch Size**: Based on performance tests, recommend using batch size around 50
@@ -582,6 +584,46 @@ BatchSize500: 198.6 ns/op  (Batch too large)
 4. **Context Management**: Use context to control pipeline lifecycle
 5. **Deduplication Key Design**: Ensure uniqueness and stability of deduplication keys
 6. **Performance Tuning**: Choose appropriate configuration parameters based on benchmark test results
+7. **⚠️ Pipeline Reuse**: For repeated pipeline usage, avoid closing DataChan prematurely. Use context timeout/cancellation instead of channel closure to end processing
+
+### Pipeline Reuse Pattern
+
+When you need to run the same pipeline multiple times:
+
+```go
+// ✅ Correct: Use context to control lifecycle
+pipeline := gopipeline.NewStandardPipeline(config, batchFunc)
+dataChan := pipeline.DataChan() // Get channel once
+
+// First run
+ctx1, cancel1 := context.WithTimeout(context.Background(), time.Second*30)
+go pipeline.SyncPerform(ctx1)
+// Send data without closing channel
+for _, data := range firstBatch {
+    select {
+    case dataChan <- data:
+    case <-ctx1.Done():
+        break
+    }
+}
+cancel1() // End first run
+
+// Second run - reuse same pipeline and channel
+ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second*30)
+go pipeline.SyncPerform(ctx2)
+// Send data again without closing channel
+for _, data := range secondBatch {
+    select {
+    case dataChan <- data:
+    case <-ctx2.Done():
+        break
+    }
+}
+cancel2() // End second run
+
+// ❌ Wrong: Closing channel prevents reuse
+// close(dataChan) // Don't do this if you plan to reuse!
+```
 
 ## 📊 Error Handling
 

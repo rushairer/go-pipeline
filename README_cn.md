@@ -574,6 +574,8 @@ BatchSize500: 198.6 ns/op  (批次过大)
 
 > **通道管理**: v2 版本遵循"谁写谁关闭"原则，用户需要控制 `DataChan()` 的关闭时机。
 
+> **⚠️ 管道重复使用警告**: 如果需要重复使用同一个管道实例进行多次运行（多次调用 `SyncPerform()` 或 `AsyncPerform()`），**不要提前关闭 DataChan**。`DataChan()` 返回的是同一个通道实例，一旦关闭就无法再次使用。应该使用 context 取消或超时来控制管道生命周期。
+
 ## 🔧 最佳实践
 
 1. **合理设置批次大小**: 根据性能测试，推荐使用 50 左右的批次大小
@@ -582,6 +584,46 @@ BatchSize500: 198.6 ns/op  (批次过大)
 4. **上下文管理**: 使用context控制管道生命周期
 5. **去重键设计**: 确保去重键的唯一性和稳定性
 6. **性能调优**: 根据基准测试结果选择合适的配置参数
+7. **⚠️ 管道重复使用**: 对于需要重复使用的管道，避免提前关闭 DataChan。使用 context 超时/取消而不是通道关闭来结束处理
+
+### 管道重复使用模式
+
+当需要多次运行同一个管道时：
+
+```go
+// ✅ 正确：使用 context 控制生命周期
+pipeline := gopipeline.NewStandardPipeline(config, batchFunc)
+dataChan := pipeline.DataChan() // 只获取一次通道
+
+// 第一次运行
+ctx1, cancel1 := context.WithTimeout(context.Background(), time.Second*30)
+go pipeline.SyncPerform(ctx1)
+// 发送数据但不关闭通道
+for _, data := range firstBatch {
+    select {
+    case dataChan <- data:
+    case <-ctx1.Done():
+        break
+    }
+}
+cancel1() // 结束第一次运行
+
+// 第二次运行 - 重复使用同一个管道和通道
+ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second*30)
+go pipeline.SyncPerform(ctx2)
+// 再次发送数据但不关闭通道
+for _, data := range secondBatch {
+    select {
+    case dataChan <- data:
+    case <-ctx2.Done():
+        break
+    }
+}
+cancel2() // 结束第二次运行
+
+// ❌ 错误：关闭通道会阻止重复使用
+// close(dataChan) // 如果计划重复使用，不要这样做！
+```
 
 ## 📊 错误处理
 

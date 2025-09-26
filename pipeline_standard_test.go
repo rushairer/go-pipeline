@@ -337,6 +337,194 @@ func TestStandardPipelineDataChanClosed(t *testing.T) {
 	}
 }
 
+// TestStandardPipelineSyncPerformRestart 测试同步队列重复启动和前后独立性
+func TestStandardPipelineSyncPerformRestart(t *testing.T) {
+	var mux sync.Mutex
+	var firstRunProcessed, secondRunProcessed int
+	var processOrder []int
+
+	pipeline := gopipeline.NewStandardPipeline(
+		gopipeline.PipelineConfig{
+			BufferSize:    16,
+			FlushSize:     32,
+			FlushInterval: time.Millisecond * 50,
+		},
+		func(ctx context.Context, batchData []int) error {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				mux.Lock()
+				for _, data := range batchData {
+					processOrder = append(processOrder, data)
+				}
+				mux.Unlock()
+				return nil
+			}
+		})
+
+	// 第一次运行
+	t.Log("开始第一次同步运行")
+	ctx1, cancel1 := context.WithTimeout(context.Background(), time.Second*1)
+	defer cancel1()
+
+	// 启动第一次同步处理
+	performDone1 := make(chan error, 1)
+	go func() {
+		performDone1 <- pipeline.SyncPerform(ctx1)
+	}()
+
+	// 监听第一次运行的错误
+	errorChan1 := pipeline.ErrorChan(10)
+	go func() {
+		for err := range errorChan1 {
+			t.Errorf("First run: Expected no error, got %v", err)
+		}
+	}()
+
+	// 第一次运行添加数据 - 不关闭通道，让 context 超时结束
+	dataChan := pipeline.DataChan()
+	dataSent1 := make(chan bool, 1)
+	go func() {
+		defer func() { dataSent1 <- true }()
+		for i := 100; i < 200; i++ { // 使用100-199的数据
+			select {
+			case dataChan <- i:
+			case <-ctx1.Done():
+				return
+			}
+		}
+	}()
+
+	// 等待数据发送完成或超时
+	select {
+	case <-dataSent1:
+		t.Log("第一次运行数据发送完成")
+	case <-time.After(time.Millisecond * 500):
+		t.Log("第一次运行数据发送超时，继续等待处理完成")
+	}
+
+	// 等待第一次运行完成
+	select {
+	case err := <-performDone1:
+		if err != nil && !errors.Is(err, gopipeline.ErrContextIsClosed) {
+			t.Errorf("First run failed: %v", err)
+		}
+	case <-time.After(time.Second * 2):
+		t.Error("First run timed out")
+	}
+
+	// 记录第一次运行的结果
+	mux.Lock()
+	firstRunProcessed = len(processOrder)
+	firstRunOrder := make([]int, len(processOrder))
+	copy(firstRunOrder, processOrder)
+	processOrder = nil // 清空处理顺序记录
+	mux.Unlock()
+
+	t.Logf("第一次运行处理了 %d 个项目", firstRunProcessed)
+
+	// 等待一段时间确保第一次运行完全结束
+	time.Sleep(time.Millisecond * 200)
+
+	// 第二次运行
+	t.Log("开始第二次同步运行")
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second*1)
+	defer cancel2()
+
+	// 启动第二次同步处理
+	performDone2 := make(chan error, 1)
+	go func() {
+		performDone2 <- pipeline.SyncPerform(ctx2)
+	}()
+
+	// 监听第二次运行的错误
+	errorChan2 := pipeline.ErrorChan(10)
+	go func() {
+		for err := range errorChan2 {
+			t.Errorf("Second run: Expected no error, got %v", err)
+		}
+	}()
+
+	// 第二次运行添加数据 - 复用同一个 dataChan，不关闭通道
+	dataSent2 := make(chan bool, 1)
+	go func() {
+		defer func() { dataSent2 <- true }()
+		for i := 200; i < 300; i++ { // 使用200-299的数据
+			select {
+			case dataChan <- i:
+			case <-ctx2.Done():
+				return
+			}
+		}
+	}()
+
+	// 等待数据发送完成或超时
+	select {
+	case <-dataSent2:
+		t.Log("第二次运行数据发送完成")
+	case <-time.After(time.Millisecond * 500):
+		t.Log("第二次运行数据发送超时，继续等待处理完成")
+	}
+
+	// 等待第二次运行完成
+	select {
+	case err := <-performDone2:
+		if err != nil && !errors.Is(err, gopipeline.ErrContextIsClosed) {
+			t.Errorf("Second run failed: %v", err)
+		}
+	case <-time.After(time.Second * 2):
+		t.Error("Second run timed out")
+	}
+
+	// 记录第二次运行的结果
+	mux.Lock()
+	secondRunProcessed = len(processOrder)
+	secondRunOrder := make([]int, len(processOrder))
+	copy(secondRunOrder, processOrder)
+	mux.Unlock()
+
+	t.Logf("第二次运行处理了 %d 个项目", secondRunProcessed)
+
+	// 验证结果 - 由于使用超时机制，可能不会处理完所有数据，所以检查处理的数据是否大于0
+	if firstRunProcessed == 0 {
+		t.Errorf("第一次运行: 期望处理一些项目，实际处理了 %d 个", firstRunProcessed)
+	}
+
+	if secondRunProcessed == 0 {
+		t.Errorf("第二次运行: 期望处理一些项目，实际处理了 %d 个", secondRunProcessed)
+	}
+
+	// 验证数据独立性：第一次运行的数据应该在100-199范围内
+	for _, val := range firstRunOrder {
+		if val < 100 || val >= 200 {
+			t.Errorf("第一次运行包含了不应该的数据: %d", val)
+		}
+	}
+
+	// 验证数据独立性：第二次运行的数据应该在200-299范围内
+	for _, val := range secondRunOrder {
+		if val < 200 || val >= 300 {
+			t.Errorf("第二次运行包含了不应该的数据: %d", val)
+		}
+	}
+
+	// 验证同步队列的有序性（在每次运行内部应该保持顺序）
+	for i := 1; i < len(firstRunOrder); i++ {
+		if firstRunOrder[i] < firstRunOrder[i-1] {
+			t.Errorf("第一次运行数据顺序错误: %d 出现在 %d 之后", firstRunOrder[i], firstRunOrder[i-1])
+		}
+	}
+
+	for i := 1; i < len(secondRunOrder); i++ {
+		if secondRunOrder[i] < secondRunOrder[i-1] {
+			t.Errorf("第二次运行数据顺序错误: %d 出现在 %d 之后", secondRunOrder[i], secondRunOrder[i-1])
+		}
+	}
+
+	t.Log("同步队列重复启动测试通过：两次运行相互独立，数据处理正确且有序")
+}
+
 // TestStandardPipelineErrorChanSize 测试错误通道大小配置
 func TestStandardPipelineErrorChanSize(t *testing.T) {
 	pipeline := gopipeline.NewDefaultStandardPipeline(
