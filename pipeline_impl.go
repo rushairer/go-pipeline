@@ -2,6 +2,8 @@ package gopipeline
 
 import (
 	"context"
+	"log"
+	"sync"
 	"time"
 )
 
@@ -16,6 +18,8 @@ type PipelineImpl[T any] struct {
 	processor DataProcessor[T]
 	// 错误通道，用于捕获和报告异步执行过程中的错误
 	errorChan chan error
+	// errOnce 用于确保错误只被发送一次
+	errOnce sync.Once
 }
 
 // 确保 PipelineImpl 实现了 Performer 接口
@@ -136,6 +140,7 @@ func (p *PipelineImpl[T]) doFlush(
 func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any) {
 	defer func() {
 		if r := recover(); r != nil {
+			log.Println("panic recovered in pipeline: ", r)
 		}
 	}()
 
@@ -145,13 +150,18 @@ func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any)
 	}
 }
 
+// 计算默认错误通道缓冲区大小
+func (p *PipelineImpl[T]) defaultErrBufSize() int {
+	return int((p.config.FlushSize + p.config.BufferSize - 1) / p.config.BufferSize)
+}
+
 // safeErrorSend 安全地发送错误到错误通道
 // 如果错误通道未初始化（用户未调用ErrorChan），则跳过错误发送
 func (p *PipelineImpl[T]) safeErrorSend(err error) {
-	if p.errorChan == nil {
-		// 用户未调用 ErrorChan() 方法，跳过错误处理
+	if err == nil {
 		return
 	}
+	_ = p.ErrorChan(0) // 确保已初始化，并获取同一实例的快照
 
 	// 使用非阻塞发送，避免阻塞管道处理
 	go func() {
@@ -166,22 +176,18 @@ func (p *PipelineImpl[T]) safeErrorSend(err error) {
 }
 
 // ErrorChan 返回一个只读的错误通道，用于接收管道处理过程中的错误
+// 线程安全、幂等的错误通道获取：首次调用决定缓冲，之后忽略 size
 // 参数:
 //   - size: 错误通道的缓冲区大小，如果为0则使用自动计算的默认大小
 //
 // 返回值: 返回一个只读的错误通道
-//
-// 注意: 这是一个可选的方法调用。如果不调用此方法，错误会被安全地忽略
-// 如果调用此方法，建议监听错误通道并使用select语句避免无限等待
 func (p *PipelineImpl[T]) ErrorChan(size int) <-chan error {
-	if p.errorChan != nil {
-		return p.errorChan
-	}
-	if size == 0 {
-		// 自动计算合理的缓冲区大小
-		p.errorChan = make(chan error, int((p.config.FlushSize+p.config.BufferSize-1)/p.config.BufferSize))
-	} else {
-		p.errorChan = make(chan error, size)
-	}
+	p.errOnce.Do(func() {
+		n := size
+		if n <= 0 {
+			n = p.defaultErrBufSize()
+		}
+		p.errorChan = make(chan error, n)
+	})
 	return p.errorChan
 }
