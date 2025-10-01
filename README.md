@@ -568,7 +568,7 @@ BatchSize500: 198.6 ns/op  (Batch too large)
 
 ## ⚠️ Important Notes
 
-> **Error Channel is Optional**: v2 version supports optional error handling mechanism. If you don't call `ErrorChan(size int)`, the pipeline will safely skip error handling without causing panic.
+> **Error Channel Behavior**: Lazily initialized via sync.Once. The first call to `ErrorChan(size int)` decides the buffer size; subsequent calls ignore size. Even if you don't explicitly call it, the pipeline will initialize it on first error send and write errors non-blockingly. If the channel isn't consumed and the buffer fills, subsequent errors are dropped (no blocking or panic).
 
 > **Recommended to Listen to Error Channel**: If you call `ErrorChan(size int)`, it's recommended to listen to the error channel and use select statements to avoid infinite waiting.
 
@@ -635,14 +635,14 @@ The framework provides comprehensive error handling mechanisms:
 
 ### Error Channel Mechanism
 
-v2 version provides **optional error handling mechanism** with the following characteristics:
+v2 version provides a robust error handling mechanism with lazy initialization and non-blocking semantics:
 
 #### 🛡️ Safety Mechanisms
 
-- **Optional Call**: `ErrorChan(size int)` method is optional, not calling it won't cause panic
-- **Safe Skip**: If `ErrorChan()` is not called, errors will be safely ignored
-- **Non-blocking Send**: Uses non-blocking mechanism to send errors, avoiding pipeline blocking
-- **Buffer Full Handling**: When error channel buffer is full, new errors will be discarded instead of blocking
+- **First-call Decides Size**: `ErrorChan(size int)` uses sync.Once; the first call decides buffer size, later calls ignore size. If never called explicitly, a default buffer size is used on first internal send.
+- **Optional Consumption**: Listening to the error channel is optional; if unconsumed and the buffer fills, subsequent errors are dropped to avoid blocking.
+- **Non-blocking Send**: Errors are sent non-blockingly, ensuring the pipeline isn't blocked.
+- **Buffer Full Handling**: When the buffer is full, new errors are discarded instead of blocking; no panic occurs.
 
 #### 📋 Usage Methods
 
@@ -666,19 +666,20 @@ go func() {
 }()
 ```
 
-**Method 2: Ignore Errors (Simplified Usage)**
+**Method 2: Run Without Consuming Errors (Simplified)**
 ```go
-// Don't call ErrorChan(), errors will be safely ignored
+// You may choose not to consume the error channel.
+// The pipeline initializes the error channel on demand and sends errors non-blockingly.
+// If the buffer fills and nobody consumes, subsequent errors are dropped (no blocking/panic).
 pipeline := gopipeline.NewStandardPipeline(config, flushFunc)
 go pipeline.AsyncPerform(ctx)
-// Pipeline runs normally, errors are safely skipped, no panic
 ```
 
 #### ⚡ Error Handling Performance
 
-- **Zero Overhead**: When not calling `ErrorChan()`, error handling has almost no performance overhead
-- **Async Processing**: Error sending is done in separate goroutines, doesn't affect main flow
-- **Smart Discard**: Automatically discards errors when buffer is full, ensuring pipeline isn't blocked
+- **Near-zero Overhead**: Error channel is initialized once on demand; sends are non-blocking and lightweight.
+- **Async Processing**: Error sending runs independently, minimizing impact on the main flow.
+- **Smart Discard**: When the buffer is full and unconsumed, subsequent errors are dropped, preventing blocking.
 
 ## 🧪 Testing
 
@@ -769,7 +770,7 @@ Deduplication pipeline adds the following performance characteristics on top of 
 **A:** Important improvements in v2:
 
 1. **Removed Add() Method**: Changed to DataChan() API, follows "writer closes" principle
-2. **Error Channel Improvement**: ErrorChan(size int) requires specifying buffer size
+2. **Error Channel Improvement**: `ErrorChan(size int)` uses lazy init; the first call decides the buffer size (later calls ignore size). If never called, a default size is used internally on first send.
 3. **Performance Optimization**: Default configuration optimized based on benchmark tests
 4. **Better Lifecycle Management**: Users control data channel closing timing
 

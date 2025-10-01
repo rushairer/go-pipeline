@@ -18,7 +18,7 @@ type PipelineImpl[T any] struct {
 	processor DataProcessor[T]
 	// 错误通道，用于捕获和报告异步执行过程中的错误
 	errorChan chan error
-	// errOnce 用于确保错误只被发送一次
+	// errOnce 确保错误通道只初始化一次（用于 ErrorChan 的懒加载）
 	errOnce sync.Once
 }
 
@@ -54,6 +54,7 @@ func (p *PipelineImpl[T]) DataChan() chan<- T {
 // 参数:
 //   - ctx: 上下文对象，用于控制操作的生命周期
 //
+// 运行时产生的错误将通过 ErrorChan 下发（需显式调用 ErrorChan 接收）
 // 返回值: 如果执行过程中发生错误则返回error
 func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context) error {
 	err := p.performLoop(ctx, true)
@@ -64,6 +65,7 @@ func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context) error {
 // 参数:
 //   - ctx: 上下文对象，用于控制操作的生命周期
 //
+// 运行时产生的错误将通过 ErrorChan 下发（需显式调用 ErrorChan 接收）
 // 返回值: 如果执行过程中发生错误则返回error
 func (p *PipelineImpl[T]) SyncPerform(ctx context.Context) error {
 	err := p.performLoop(ctx, false)
@@ -156,7 +158,10 @@ func (p *PipelineImpl[T]) defaultErrBufSize() int {
 }
 
 // safeErrorSend 安全地发送错误到错误通道
-// 如果错误通道未初始化（用户未调用ErrorChan），则跳过错误发送
+// 行为说明：
+// 1) 调用 ErrorChan(0) 确保通道已按“首次调用决定缓冲大小”的规则完成一次性初始化
+// 2) 使用非阻塞发送；当缓冲区已满时丢弃该错误，避免阻塞处理主循环
+// 3) 错误通道的生命周期由管道控制，通常不应在外部关闭
 func (p *PipelineImpl[T]) safeErrorSend(err error) {
 	if err == nil {
 		return
@@ -176,11 +181,26 @@ func (p *PipelineImpl[T]) safeErrorSend(err error) {
 }
 
 // ErrorChan 返回一个只读的错误通道，用于接收管道处理过程中的错误
-// 线程安全、幂等的错误通道获取：首次调用决定缓冲，之后忽略 size
+// 线程安全、幂等：通过 sync.Once 懒初始化；“首次调用决定缓冲大小”，后续调用忽略 size
 // 参数:
-//   - size: 错误通道的缓冲区大小，如果为0则使用自动计算的默认大小
+//   - size: 错误通道的缓冲区大小；<=0 时使用默认值（根据 FlushSize 和 BufferSize 自动计算）
 //
-// 返回值: 返回一个只读的错误通道
+// 返回值:
+//   - <-chan error: 错误只读通道
+//
+// 用法示例:
+//
+//	ch := p.ErrorChan(128) // 在启动前显式指定错误缓冲区大小
+//	go func() {
+//	    for err := range ch {
+//	        log.Println("pipeline error:", err)
+//	    }
+//	}()
+//	// 如果不关心自定义容量，可在执行前或读取前调用 p.ErrorChan(0)
+//
+// 异常处理说明:
+//   - 刷新过程中的错误通过 safeErrorSend 非阻塞写入本通道，缓冲满时会丢弃该错误以避免阻塞
+//   - 通道由管道内部创建且仅初始化一次，不建议外部关闭；收尾由 context/WaitGroup 协调
 func (p *PipelineImpl[T]) ErrorChan(size int) <-chan error {
 	p.errOnce.Do(func() {
 		n := size
