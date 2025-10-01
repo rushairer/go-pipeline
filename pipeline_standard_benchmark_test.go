@@ -277,9 +277,9 @@ func BenchmarkPipelineAsyncVsSync(b *testing.B) {
 				})
 
 			if mode.async {
-				go pipeline.AsyncPerform(ctx)
+				go func() { _ = pipeline.AsyncPerform(ctx) }()
 			} else {
-				go pipeline.SyncPerform(ctx)
+				go func() { _ = pipeline.SyncPerform(ctx) }()
 			}
 
 			dataChan := pipeline.DataChan()

@@ -3,6 +3,7 @@ package gopipeline_test
 import (
 	"context"
 	"fmt"
+	"log"
 	"testing"
 	"time"
 
@@ -27,7 +28,9 @@ func TestPipelineWithoutErrorChan(t *testing.T) {
 		})
 
 	// 启动管道处理（不调用 ErrorChan 方法）
+	doneChan := make(chan struct{})
 	go func() {
+		defer close(doneChan)
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Logf("Pipeline finished with: %v", err)
 		}
@@ -51,6 +54,8 @@ func TestPipelineWithoutErrorChan(t *testing.T) {
 
 	// 如果没有 panic，说明修复成功
 	t.Log("Test passed: No panic when ErrorChan() is not called")
+
+	<-doneChan
 }
 
 // TestPipelineWithErrorChan 测试用户调用 ErrorChan() 方法的情况
@@ -73,7 +78,11 @@ func TestPipelineWithErrorChan(t *testing.T) {
 		})
 
 	// 启动管道处理
+	doneChan := make(chan struct{})
+
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			// 使用 t.Log 而不是 t.Logf 避免测试完成后的日志问题
 			if ctx.Err() == nil {
@@ -84,7 +93,10 @@ func TestPipelineWithErrorChan(t *testing.T) {
 
 	// 监听错误通道
 	errorChan := pipeline.ErrorChan(10)
+	doneChan2 := make(chan struct{})
+
 	go func() {
+		defer close(doneChan2)
 		for {
 			select {
 			case err, ok := <-errorChan:
@@ -92,7 +104,7 @@ func TestPipelineWithErrorChan(t *testing.T) {
 					return
 				}
 				errorCount++
-				t.Logf("Received error: %v", err)
+				log.Printf("Received error: %v", err)
 			case <-ctx.Done():
 				return
 			}
@@ -115,11 +127,15 @@ func TestPipelineWithErrorChan(t *testing.T) {
 	// 等待处理完成
 	<-ctx.Done()
 
+	<-doneChan
+	<-doneChan2
+
 	if errorCount == 0 {
 		t.Error("Expected to receive errors, but got none")
 	} else {
 		t.Logf("Successfully received %d errors", errorCount)
 	}
+
 }
 
 // TestPipelineErrorChanFullBuffer 测试错误通道缓冲区满的情况
@@ -140,7 +156,10 @@ func TestPipelineErrorChanFullBuffer(t *testing.T) {
 		})
 
 	// 启动管道处理
+	doneChan := make(chan struct{})
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Logf("Pipeline finished with: %v", err)
 		}
@@ -149,9 +168,11 @@ func TestPipelineErrorChanFullBuffer(t *testing.T) {
 	// 创建一个很小的错误通道缓冲区
 	errorChan := pipeline.ErrorChan(2)
 	receivedErrors := 0
+	doneChan2 := make(chan struct{})
 
 	// 故意不及时消费错误通道，让它满
 	go func() {
+		defer close(doneChan2)
 		time.Sleep(time.Millisecond * 500) // 延迟消费
 		for {
 			select {
@@ -160,7 +181,7 @@ func TestPipelineErrorChanFullBuffer(t *testing.T) {
 					return
 				}
 				receivedErrors++
-				t.Logf("Received error: %v", err)
+				log.Printf("Received error: %v", err)
 			case <-ctx.Done():
 				return
 			}
@@ -182,6 +203,8 @@ func TestPipelineErrorChanFullBuffer(t *testing.T) {
 
 	// 等待处理完成
 	<-ctx.Done()
+	<-doneChan
+	<-doneChan2
 
 	// 应该收到一些错误，但不是全部（因为缓冲区满了会丢弃）
 	t.Logf("Received %d errors (some may have been dropped due to full buffer)", receivedErrors)
@@ -189,4 +212,5 @@ func TestPipelineErrorChanFullBuffer(t *testing.T) {
 	if receivedErrors == 0 {
 		t.Error("Expected to receive at least some errors")
 	}
+
 }

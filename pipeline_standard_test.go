@@ -32,8 +32,11 @@ func TestStandardPipelineAsyncPerform(t *testing.T) {
 			return nil
 		})
 
+	doneChan := make(chan struct{})
 	// 启动异步处理
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Log("AsyncPerform finished with:", err)
 		}
@@ -69,6 +72,8 @@ func TestStandardPipelineAsyncPerform(t *testing.T) {
 	if finalCount != 1000 {
 		t.Errorf("Expected 1000 processed items, got %d", finalCount)
 	}
+
+	<-doneChan
 }
 
 // TestStandardPipelineAsyncPerformWithFlushError 测试异步执行时的错误处理
@@ -99,7 +104,10 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 		})
 
 	// 启动异步处理
+	doneChan := make(chan struct{})
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Log("AsyncPerform finished with:", err)
 		}
@@ -146,6 +154,8 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 	if finalErrorCount == 0 {
 		t.Errorf("Expected some errors, got %d", finalErrorCount)
 	}
+
+	<-doneChan
 }
 
 // TestStandardPipelineAsyncPerformTimeout 测试异步执行超时场景
@@ -176,10 +186,14 @@ func TestStandardPipelineAsyncPerformTimeout(t *testing.T) {
 		})
 
 	// 启动异步处理
+	doneChan := make(chan struct{})
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Log("AsyncPerform finished with:", err)
 		}
+
 	}()
 
 	// 监听错误
@@ -214,6 +228,8 @@ func TestStandardPipelineAsyncPerformTimeout(t *testing.T) {
 	if finalCount >= 1000 {
 		t.Errorf("Expected less than 1000 processed items due to timeout, got %d", finalCount)
 	}
+
+	<-doneChan
 }
 
 // TestStandardPipelineSyncPerform 测试同步执行管道操作
@@ -244,7 +260,10 @@ func TestStandardPipelineSyncPerform(t *testing.T) {
 		})
 
 	// 启动同步处理
+	doneChan := make(chan struct{})
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.SyncPerform(ctx); err != nil {
 			t.Log("SyncPerform finished with:", err)
 		}
@@ -280,6 +299,8 @@ func TestStandardPipelineSyncPerform(t *testing.T) {
 	if finalCount != 500 {
 		t.Errorf("Expected 500 processed items, got %d", finalCount)
 	}
+
+	<-doneChan
 }
 
 // TestStandardPipelineDataChanClosed 测试数据通道关闭后的行为
@@ -355,9 +376,7 @@ func TestStandardPipelineSyncPerformRestart(t *testing.T) {
 				return nil
 			default:
 				mux.Lock()
-				for _, data := range batchData {
-					processOrder = append(processOrder, data)
-				}
+				processOrder = append(processOrder, batchData...)
 				mux.Unlock()
 				return nil
 			}

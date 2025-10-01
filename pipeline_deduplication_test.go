@@ -51,7 +51,10 @@ func TestDeduplicationPipelineAsyncPerform(t *testing.T) {
 		})
 
 	// 启动异步处理
+	doneChan := make(chan struct{})
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Log("AsyncPerform finished with:", err)
 		}
@@ -101,6 +104,9 @@ func TestDeduplicationPipelineAsyncPerform(t *testing.T) {
 	if finalUniqueCount >= 1000 {
 		t.Errorf("Expected unique count to be less than 1000 due to deduplication, got %d", finalUniqueCount)
 	}
+
+	<-doneChan
+
 }
 
 // TestDeduplicationPipelineAsyncPerformWithFlushError 测试异步执行时的错误处理
@@ -131,7 +137,11 @@ func TestDeduplicationPipelineAsyncPerformWithFlushError(t *testing.T) {
 		})
 
 	// 启动异步处理
+	doneChan := make(chan struct{})
+
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Log("AsyncPerform finished with:", err)
 		}
@@ -184,6 +194,8 @@ func TestDeduplicationPipelineAsyncPerformWithFlushError(t *testing.T) {
 	if finalErrorCount == 0 {
 		t.Error("Expected some errors, got 0")
 	}
+
+	<-doneChan
 }
 
 // TestDeduplicationPipelineSyncPerform 测试同步执行去重管道操作
@@ -218,7 +230,10 @@ func TestDeduplicationPipelineSyncPerform(t *testing.T) {
 		})
 
 	// 启动同步处理
+	doneChan := make(chan struct{})
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.SyncPerform(ctx); err != nil {
 			t.Log("SyncPerform finished with:", err)
 		}
@@ -262,6 +277,8 @@ func TestDeduplicationPipelineSyncPerform(t *testing.T) {
 	if finalCount != finalUniqueCount {
 		t.Errorf("Expected processed count (%d) to equal unique count (%d)", finalCount, finalUniqueCount)
 	}
+
+	<-doneChan
 }
 
 // TestDeduplicationPipelineDataChanClosed 测试数据通道关闭后的行为
@@ -371,7 +388,11 @@ func TestDeduplicationPipelineCompleteDeduplication(t *testing.T) {
 		})
 
 	// 启动异步处理
+	doneChan := make(chan struct{})
+
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Log("AsyncPerform finished with:", err)
 		}
@@ -418,4 +439,6 @@ func TestDeduplicationPipelineCompleteDeduplication(t *testing.T) {
 	if finalCount != 5 {
 		t.Errorf("Expected exactly 5 processed items, got %d", finalCount)
 	}
+
+	<-doneChan
 }

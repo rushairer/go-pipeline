@@ -8,6 +8,21 @@ import (
 	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
+/*
+*
+testSendToErrorChan 辅助函数，验证错误通道的缓冲容量
+- 直接使用 cap(errorChan) 获取缓冲区大小
+- 对 nil 通道进行保护
+*/
+func testSendToErrorChan(t *testing.T, errorChan <-chan error, expectedCapacity int) {
+	if errorChan == nil {
+		t.Fatalf("errorChan is nil")
+	}
+	if got := cap(errorChan); got != expectedCapacity {
+		t.Fatalf("errorChan capacity = %d; want %d", got, expectedCapacity)
+	}
+}
+
 // TestErrorChanAutoBufferSize 测试ErrorChan方法在size=0时的自动缓冲区大小计算
 func TestErrorChanAutoBufferSize(t *testing.T) {
 	_, cancel := context.WithTimeout(context.Background(), time.Second*3)
@@ -105,7 +120,11 @@ func TestErrorChanWithoutCall(t *testing.T) {
 	)
 
 	// 启动管道处理（不调用ErrorChan）
+	doneChan := make(chan struct{})
+
 	go func() {
+		defer close(doneChan)
+
 		if err := pipeline.AsyncPerform(ctx); err != nil {
 			t.Logf("Pipeline finished with: %v", err)
 		}
@@ -129,36 +148,8 @@ func TestErrorChanWithoutCall(t *testing.T) {
 
 	// 如果没有panic，说明错误被安全地忽略了
 	t.Log("Test passed: Errors safely ignored when ErrorChan() is not called")
-}
 
-// testSendToErrorChan 辅助函数，测试向错误通道发送数据
-func testSendToErrorChan(t *testing.T, errorChan <-chan error, expectedCapacity int) {
-	// 创建一个临时通道用于测试容量
-	testChan := make(chan error, expectedCapacity)
-
-	// 填充测试通道到容量
-	for i := 0; i < expectedCapacity; i++ {
-		select {
-		case testChan <- context.DeadlineExceeded:
-			// 成功发送
-		default:
-			t.Errorf("Expected capacity at least %d, but failed to send item %d", expectedCapacity, i)
-			return
-		}
-	}
-
-	// 尝试发送超出容量的项目（应该失败）
-	select {
-	case testChan <- context.DeadlineExceeded:
-		t.Errorf("Expected capacity %d, but was able to send extra item", expectedCapacity)
-	default:
-		// 预期行为：无法发送，说明容量正确
-	}
-
-	// 清空通道
-	for i := 0; i < expectedCapacity; i++ {
-		<-testChan
-	}
+	<-doneChan
 }
 
 // TestErrorChanBufferSizeCalculation 测试不同配置下的缓冲区大小计算
