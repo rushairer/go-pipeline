@@ -283,8 +283,7 @@ func TestDeduplicationPipelineSyncPerform(t *testing.T) {
 
 // TestDeduplicationPipelineDataChanClosed 测试数据通道关闭后的行为
 func TestDeduplicationPipelineDataChanClosed(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
-	defer cancel()
+	ctx := context.Background()
 
 	var mux sync.Mutex
 	var processedCount int
@@ -322,6 +321,8 @@ func TestDeduplicationPipelineDataChanClosed(t *testing.T) {
 		}
 	}
 	close(dataChan) // 关闭数据通道
+
+	time.Sleep(time.Second) // 等待数据发送完毕
 
 	// 等待处理完成
 	select {

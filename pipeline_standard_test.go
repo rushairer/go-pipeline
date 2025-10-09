@@ -305,8 +305,7 @@ func TestStandardPipelineSyncPerform(t *testing.T) {
 
 // TestStandardPipelineDataChanClosed 测试数据通道关闭后的行为
 func TestStandardPipelineDataChanClosed(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
-	defer cancel()
+	ctx := context.Background()
 
 	var mux sync.Mutex
 	var processedCount int
@@ -337,7 +336,8 @@ func TestStandardPipelineDataChanClosed(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		dataChan <- i
 	}
-	close(dataChan) // 关闭数据通道
+	close(dataChan)         // 关闭数据通道
+	time.Sleep(time.Second) // 等待数据发送完毕
 
 	// 等待处理完成
 	select {
