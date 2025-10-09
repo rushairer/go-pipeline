@@ -142,9 +142,11 @@ graph TD
 
 ```go
 type PipelineConfig struct {
-    BufferSize    uint32        // 缓冲通道的容量 (默认: 100)
-    FlushSize     uint32        // 批处理数据的最大容量 (默认: 50)
-    FlushInterval time.Duration // 定时刷新的时间间隔 (默认: 50ms)
+    BufferSize        uint32        // 缓冲通道的容量 (默认: 100)
+    FlushSize         uint32        // 批处理数据的最大容量 (默认: 50)
+    FlushInterval     time.Duration // 定时刷新的时间间隔 (默认: 50ms)
+    DrainOnCancel     bool          // 取消时是否进行限时收尾刷新（默认 false：不 flush）
+    DrainGracePeriod  time.Duration // 收尾刷新最长时间窗口（启用 DrainOnCancel 时生效）
 }
 ```
 
@@ -155,6 +157,231 @@ type PipelineConfig struct {
 - **BufferSize: 100** - 缓冲区大小，应该 >= FlushSize * 2 以避免阻塞
 - **FlushSize: 50** - 批处理大小，性能测试显示 50 左右为最优
 - **FlushInterval: 50ms** - 刷新间隔，平衡延迟和吞吐量
+
+### FlushSize 与 BufferSize：关系与调参
+
+- 角色：
+  - FlushSize：批次大小阈值；达到该值触发一次刷新（或者由 FlushInterval 定时触发）。
+  - BufferSize：输入通道容量；决定生产者在不阻塞的情况下可排队多少待处理数据。
+- 推荐关系：BufferSize ≥ k × FlushSize，其中 k ∈ [4, 10]，在突发写入下更稳定。
+- 不同关系对性能的影响：
+  - BufferSize < FlushSize：更频繁依赖定时刷新形成小批次，吞吐降低、延迟与 GC 开销上升。
+  - BufferSize ≈ 2×FlushSize：一般可用，但对生产峰值较敏感。
+  - BufferSize ≥ 4–10×FlushSize：满批次比例更高、吞吐更好、生产者更少阻塞（但内存占用更大）。
+- 与 FlushInterval 的协同：
+  - FlushInterval 用于限定尾部延迟（未满批次时到时也会刷新）。
+  - BufferSize 过小会导致更多刷新走“超时路径”，有效批次变小。
+
+基于处理函数成本的估算方法：
+- 在刷新函数中测量：
+  - t_item：每个元素的平均处理时间（ns/item）
+  - t_batch：每批次的固定开销（ns/batch），如 DB 往返、编码等
+- 设定摊薄目标 α（如 0.1 表示每批次固定开销分摊到每个元素 ≤ 每元素成本的 10%）
+- 则：
+  - FlushSize ≥ ceil(t_batch / (α × t_item))  // 实务上建议夹在 [32, 128]；默认 50
+  - BufferSize = k × FlushSize，k 取 [4, 10]，按并发生产者数量与突发程度调整
+- 示例：
+  - t_item = 2µs，t_batch = 200µs，α = 0.1 ⇒ FlushSize ≥ 200 / (0.1×2) = 1000
+    - 若强调延迟，可夹到 128；若纯追求吞吐，可保留 1000
+    - BufferSize 再取 4–10 × FlushSize
+
+推荐的均衡默认值：
+- FlushSize: 50
+- BufferSize: 100（≈ 2×FlushSize；多生产者或突发场景可增至 4–10×）
+- FlushInterval: 50ms
+
+### 调参速查表（Cheat Sheet）
+
+场景快速推荐：
+- 高吞吐优先
+  - FlushSize：64–128（默认 50 已较均衡，如纯吞吐可上调）
+  - BufferSize：4–10 × FlushSize（并发/突发越强取值越大）
+  - FlushInterval：50–100ms
+- 低延迟优先
+  - FlushSize：8–32
+  - BufferSize：≥ 4 × FlushSize
+  - FlushInterval：1–10ms（限制尾延迟）
+- 内存受限
+  - FlushSize：16–32
+  - BufferSize：2–4 × FlushSize（上限由内存预算决定）
+  - FlushInterval：50–200ms
+- 多生产者（N 个生产者）
+  - 建议：BufferSize ≥ (4–10) × FlushSize × ceil(N / CPU核数)
+  - 目的：在突发流量下维持高满批次比例并减少生产者阻塞
+
+经验公式汇总：
+- FlushSize ≈ clamp( ceil(t_batch / (α × t_item)), 32, 128 )
+  - t_item：每元素平均处理时间
+  - t_batch：每批固定开销（如 DB 往返）
+  - α：摊薄目标（如 0.1 表示批固定开销/元素 ≤ 10%）
+- BufferSize = k × FlushSize，k ∈ [4, 10]，按并发与突发度调整
+- FlushInterval 选取
+  - 若以尾延迟为约束：FlushInterval ≈ 目标尾延迟上限
+  - 若以生产速率为依据：FlushInterval ≈ p99 生产间隔 × FlushSize
+
+验证与回归检查：
+- 满批次比例 ≥ 80%（越高越好，说明大多由 FlushSize 触发，而非超时触发）
+- 生产者阻塞率接近 0（避免上游背压）
+- GC/内存水位平稳（观察分配与停顿）
+- 端到端 99/99.9 分位延迟可达标
+
+示例：基于成本的推荐计算
+- 已测：t_item = 2µs，t_batch = 200µs，α = 0.1
+- 计算：FlushSize ≥ 200 / (0.1×2) = 1000
+  - 若需要平衡延迟：夹在 128；若纯吞吐：可取 512–1024 并结合更长 FlushInterval
+- 取值：
+  - FlushSize = 128（延迟可控）
+  - BufferSize = 8 × 128 = 1024（多生产者与突发友好）
+  - FlushInterval = 50ms（若需要更低尾延迟可降到 10ms，但要关注小批次比例）
+
+提示：
+- 若满批次比例偏低，优先增大 BufferSize 或缩短 FlushInterval（二选一看目标是吞吐还是延迟）
+- 若上游阻塞，增大 BufferSize；若内存吃紧，降低 k 或 FlushSize，并监控小批次比例变化
+
+### 调参测量助手（Go）
+
+使用两组样本规模测量批处理函数的耗时，估算 t_item 与 t_batch，并给出推荐的 FlushSize/BufferSize：
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"time"
+
+	gopipeline "github.com/rushairer/go-pipeline/v2"
+)
+
+// 将此函数替换为你的真实批处理逻辑（尽量减少外部副作用以降低测量噪声）
+func batchFunc(ctx context.Context, items []int) error {
+	// 模拟：每批固定开销 + 每元素成本
+	time.Sleep(200 * time.Microsecond) // t_batch（示例）
+	perItem := 2 * time.Microsecond    // t_item（示例）
+	time.Sleep(time.Duration(len(items)) * perItem)
+	return nil
+}
+
+// 测量一次指定批量的平均耗时（重复 rounds 次取平均）
+func measureOnce(n int, rounds int) time.Duration {
+	items := make([]int, n)
+	var total time.Duration
+	ctx := context.Background()
+	for i := 0; i < rounds; i++ {
+		start := time.Now()
+		_ = batchFunc(ctx, items)
+		total += time.Since(start)
+	}
+	return total / time.Duration(rounds)
+}
+
+// 线性拟合：d = t_batch + n * t_item
+func estimateCosts(n1, n2, rounds int) (tItem, tBatch time.Duration) {
+	d1 := measureOnce(n1, rounds)
+	d2 := measureOnce(n2, rounds)
+	// t_item = (d2 - d1) / (n2 - n1)
+	// t_batch = d1 - n1 * t_item
+	tItem = time.Duration(int64((d2 - d1) / time.Duration(n2-n1)))
+	tBatch = d1 - time.Duration(n1)*tItem
+	if tItem < 0 {
+		tItem = 0
+	}
+	if tBatch < 0 {
+		tBatch = 0
+	}
+	return
+}
+
+// 推荐值计算：FlushSize ≥ ceil(t_batch / (α × t_item))，实务上夹在 [32, 128]；BufferSize = k × FlushSize
+func recommend(tItem, tBatch time.Duration, alpha float64, k int) (flush uint32, buffer uint32) {
+	if tItem <= 0 || alpha <= 0 {
+		return 50, 100 // 安全默认值
+	}
+	raw := float64(tBatch) / (alpha * float64(tItem))
+	fs := int(math.Ceil(raw))
+	if fs < 32 {
+		fs = 32
+	}
+	if fs > 128 {
+		// 若纯追求吞吐，可保留 >128；若需要延迟均衡，可夹到 128
+		fs = 128
+	}
+	if k < 1 {
+		k = 4
+	}
+	return uint32(fs), uint32(k * fs)
+}
+
+func main() {
+	// 用两点测量估算成本
+	n1, n2 := 64, 512
+	rounds := 20
+	tItem, tBatch := estimateCosts(n1, n2, rounds)
+	flush, buffer := recommend(tItem, tBatch, 0.1, 8)
+
+	fmt.Printf("估算 t_item=%v, t_batch=%v\n", tItem, tBatch)
+	fmt.Printf("推荐 FlushSize=%d, BufferSize=%d (k=8, α=0.1)\n", flush, buffer)
+
+	// 使用推荐配置的示例
+	_ = gopipeline.NewStandardPipeline[int](gopipeline.PipelineConfig{
+		BufferSize:    buffer,
+		FlushSize:     flush,
+		FlushInterval: 50 * time.Millisecond,
+	}, func(ctx context.Context, batch []int) error {
+		return batchFunc(ctx, batch)
+	})
+}
+```
+
+注意事项：
+- 将 batchFunc 替换为真实处理逻辑；测量时尽量减少 IO/网络等外部副作用，以降低抖动。
+- 若测得的 FlushSize 明显大于 128 且你关注延迟，可夹在 128；若纯追求吞吐，可保留较大值并按 k 等比例增大 BufferSize。
+- 在不同机器/负载上重复测量；缓存、IO 与网络会显著影响 t_batch。
+
+### 去重管道调参
+
+要点：
+- 有效批次大小：去重后实际批次大小 ≤ FlushSize。若输入重复率高（唯一性低），有效批次可能显著小于 FlushSize。
+- 仍采用相同的成本估算方法，但需要考虑“唯一性比例” u ∈ (0,1]：
+  - 预去重批次含 N 条，唯一比例 u，则有效条数约 u × N。
+  - 计算出的 FlushSize_raw 若过大，可根据期望“有效批次”进行折中：希望有效批次≈50，则应让 u × FlushSize ≈ 50。
+- Buffer 与 Interval：
+  - BufferSize：依旧建议 BufferSize ≥ k × FlushSize，k ∈ [4,10]，以更好吸收突发。
+  - FlushInterval：当重复率高时，稍微增大 FlushInterval 有助于在时间窗内积累到足够多的“唯一项”以达到目标有效批次；需与延迟 SLO 权衡。
+- 内存注意：
+  - 去重模式批内使用 map 存储唯一键，唯一键越多，map 的额外内存越高；在 flush 函数中尽量复用缓冲以减少分配。
+
+示例（含重复）：
+- 假设 t_item = 2µs，t_batch = 200µs，α = 0.1 ⇒ 成本法得 FlushSize_raw = 1000。
+- 若唯一性比例 u ≈ 0.2，则在 FlushSize_raw 下有效批次约 200。若期望有效≈50：
+  - 可将 FlushSize 夹到 256–512 以平衡延迟，因为 u × 256 ≈ 51；若纯吞吐可保持更大。
+  - 设 BufferSize = 8 × FlushSize 以应对突发。
+
+### 多生产者场景计算示例
+
+对于 N 个生产者、P 个逻辑 CPU：
+- 经验法则：BufferSize ≥ (4–10) × FlushSize × ceil(N / P)
+- 目标：在突发下维持高“满批次比例”，并尽量减少上游阻塞。
+
+数值示例：
+- P=8 CPUs，N=16 生产者，目标 FlushSize=64，取 k=6：
+  - BufferSize ≥ 6 × 64 × ceil(16/8) = 6 × 64 × 2 = 768（可向上取整到 1024 预留余量）
+  - 若去重模式唯一性 u=0.5，且你需要每次“有效≈64”，则设置 FlushSize≈128，再按上式重算 BufferSize。
+
+### 取消（ctx.Done）收尾选项
+
+为“数据完整性 vs 立即终止”提供可配置开关：
+- DrainOnCancel（bool，默认：false）
+  - false：取消即刻停止（不做最终 flush）
+  - true：取消时对当前未满批次进行一次“限时尽力”flush，然后退出
+- DrainGracePeriod（time.Duration）
+  - 当启用 DrainOnCancel 时的收尾 flush 最长时间窗口（未设置时内部采用保守默认值约 100ms）
+
+推荐用法：
+- 正常收尾（尽量不丢数据）：关闭数据通道；框架保证 flush 剩余批次并退出
+- 强制中止：直接取消上下文，DrainOnCancel=false
+- 尽量优雅的取消：设置 DrainOnCancel=true，并配置合理的 DrainGracePeriod（如 50–200ms）；注意你的 flush 函数应尊重新的上下文
 
 ### 使用默认值配置
 
@@ -343,9 +570,9 @@ func main() {
 ```go
 // 创建自定义配置的管道
 config := gopipeline.PipelineConfig{
-    BufferSize:    200,                    // 缓冲区大小为200
-    FlushSize:     100,                    // 批次大小为100
-    FlushInterval: time.Millisecond * 100, // 100ms定时刷新
+    BufferSize:    100,                    // 缓冲区大小为100（≈ 2×FlushSize；突发场景可增至 4–10×）
+    FlushSize:     50,                     // 批次大小为50（推荐默认）
+    FlushInterval: time.Millisecond * 50,  // 50ms定时刷新（延迟与吞吐的平衡）
 }
 
 pipeline := gopipeline.NewStandardPipeline(config, 
@@ -355,6 +582,162 @@ pipeline := gopipeline.NewStandardPipeline(config,
     },
 )
 ```
+
+### 取消收尾示例
+
+两种方式结束一次运行：
+
+1) 关闭数据通道（推荐的无损收尾）
+```go
+config := gopipeline.NewPipelineConfig().
+    WithBufferSize(100).
+    WithFlushSize(50).
+    WithFlushInterval(50 * time.Millisecond)
+// 此路径与 DrainOnCancel 无关；关闭通道可确保剩余数据 flush。
+
+p := gopipeline.NewStandardPipeline(config, func(ctx context.Context, batch []string) error {
+    // 你的处理逻辑
+    return nil
+})
+
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+go func() { _ = p.AsyncPerform(ctx) }()
+
+dataChan := p.DataChan()
+go func() {
+    defer close(dataChan) // writer closes：保证剩余数据被最终 flush
+    for i := 0; i < 1000; i++ {
+        select {
+        case dataChan <- fmt.Sprintf("item-%d", i):
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+```
+
+2) 通过上下文取消，并启用取消时的限时收尾
+```go
+config := gopipeline.NewPipelineConfig().
+    WithBufferSize(100).
+    WithFlushSize(50).
+    WithFlushInterval(50 * time.Millisecond).
+    WithDrainOnCancel(true).                   // 启用取消收尾
+    WithDrainGracePeriod(150 * time.Millisecond) // 限定收尾耗时窗口
+
+p := gopipeline.NewStandardPipeline(config, func(ctx context.Context, batch []string) error {
+    // 重要：尊重 ctx；在 ctx.Done() 后尽快返回，保证在宽限窗口内完成收尾
+    return nil
+})
+
+ctx, cancel := context.WithCancel(context.Background())
+go func() { _ = p.AsyncPerform(ctx) }()
+
+dataChan := p.DataChan()
+// 发送一些数据...
+// 需要快速停止但希望尽量不丢当前未满批次：
+cancel() // 管道会在 DrainGracePeriod 内尽力 flush 一次，然后退出
+```
+
+注意：
+- 关闭通道路径可确保剩余数据被 flush，不依赖取消策略。
+- 取消收尾是“快速停止下尽量不丢”的折中；建议将 DrainGracePeriod 设为 50–200ms，并确保你的 flush 函数尊重新传入的上下文。
+
+### 去重管道取消收尾示例
+
+两种方式结束一次去重管道运行：
+
+1) 关闭数据通道（推荐的无损收尾）
+```go
+config := gopipeline.NewPipelineConfig().
+    WithBufferSize(100).
+    WithFlushSize(50).
+    WithFlushInterval(50 * time.Millisecond)
+
+type User struct {
+    ID   string
+    Name string
+}
+func (u User) GetKey() string { return u.ID }
+
+p := gopipeline.NewDefaultDeduplicationPipeline(func(ctx context.Context, batch map[string]User) error {
+    // 你的去重批处理逻辑
+    return nil
+})
+
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+go func() { _ = p.AsyncPerform(ctx) }()
+
+ch := p.DataChan()
+go func() {
+    defer close(ch) // writer closes：确保将 map 中剩余唯一项 flush 出去
+    for i := 0; i < 1000; i++ {
+        select {
+        case ch <- User{ID: fmt.Sprintf("%d", i%200), Name: "N"}: // 包含重复
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+```
+
+2) 通过上下文取消，并启用取消时的限时收尾
+```go
+config := gopipeline.NewPipelineConfig().
+    WithBufferSize(100).
+    WithFlushSize(50).
+    WithFlushInterval(50 * time.Millisecond).
+    WithDrainOnCancel(true).
+    WithDrainGracePeriod(150 * time.Millisecond)
+
+p := gopipeline.NewDefaultDeduplicationPipeline(func(ctx context.Context, batch map[string]User) error {
+    // 重要：尊重 ctx；在 ctx.Done() 后尽快返回，保证在宽限窗口内完成收尾
+    return nil
+})
+
+ctx, cancel := context.WithCancel(context.Background())
+go func() { _ = p.AsyncPerform(ctx) }()
+
+ch := p.DataChan()
+// 发送一些数据...
+cancel() // 管道会在 DrainGracePeriod 内尽力 flush 当前 dedup map，然后退出
+```
+
+注意：
+- 去重模式使用 map 维护当前批次；两种收尾策略都会确保剩余唯一项被 flush。
+- 当输入重复率很高时，可适当增大 FlushInterval 以在时间窗内积累更多唯一项，但需与延迟目标权衡。
+
+### 退出语义
+
+管道有两种退出路径：
+
+- 通道关闭：
+  - 若当前批次非空，会在 context.Background() 下同步执行一次最终 flush。
+  - 循环返回 nil（优雅退出）。
+- 上下文取消：
+  - DrainOnCancel = false：返回 ErrContextIsClosed（不做最终 flush）。
+  - DrainOnCancel = true：在独立 drainCtx 下（带超时，DrainGracePeriod，未设则内部默认约 100ms）同步执行一次最终 flush，返回 errors.Join(ErrContextIsClosed, ErrContextDrained)。
+
+可使用 errors.Is 判断退出原因：
+```go
+err := pipeline.AsyncPerform(ctx)
+// ...
+if errors.Is(err, ErrContextIsClosed) {
+    // 因上下文取消而退出
+}
+if errors.Is(err, ErrContextDrained) {
+    // 取消时已执行一次“限时收尾”flush
+}
+// 通道关闭路径：err == nil（优雅退出）
+```
+
+注意：
+- 最终收尾 flush 采用同步执行，避免停止阶段的竞态。
+- 你的 flush 函数应尊重传入的上下文（drainCtx），在宽限窗口内尽快返回。
 
 ## 🎯 使用场景
 

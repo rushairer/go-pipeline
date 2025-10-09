@@ -2,6 +2,7 @@ package gopipeline
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -90,14 +91,19 @@ func (p *PipelineImpl[T]) performLoop(
 	for {
 		select {
 		case newData, ok := <-p.dataChan:
-			if ok {
-				batchData = p.processor.addToBatch(batchData, newData)
-				if !p.processor.isBatchFull(batchData) {
-					continue
+			if !ok {
+				// 数据通道已关闭：最终刷新未满批次后退出
+				if !p.processor.isBatchEmpty(batchData) {
+					p.doFlush(context.Background(), false, batchData)
 				}
-				p.doFlush(ctx, async, batchData)
-				batchData = p.processor.initBatchData()
+				return nil
 			}
+			batchData = p.processor.addToBatch(batchData, newData)
+			if !p.processor.isBatchFull(batchData) {
+				continue
+			}
+			p.doFlush(ctx, async, batchData)
+			batchData = p.processor.initBatchData()
 		case <-ticker.C:
 			if p.processor.isBatchEmpty(batchData) {
 				continue
@@ -105,6 +111,22 @@ func (p *PipelineImpl[T]) performLoop(
 			p.doFlush(ctx, async, batchData)
 			batchData = p.processor.initBatchData()
 		case <-ctx.Done():
+			// 取消退出语义：
+			// - DrainOnCancel=false：不做最终 flush，返回 ErrContextIsClosed（可用 errors.Is(err, ErrContextIsClosed) 判断）
+			// - DrainOnCancel=true：若批次非空，在独立的、带超时的 drainCtx 下同步执行一次最终 flush；
+			//   返回 errors.Join(ErrContextIsClosed, ErrContextDrained)：
+			//     * errors.Is(err, ErrContextIsClosed) == true → 因上下文取消退出
+			//     * errors.Is(err, ErrContextDrained)  == true → 已执行限时收尾
+			if p.config.DrainOnCancel && !p.processor.isBatchEmpty(batchData) {
+				grace := p.config.DrainGracePeriod
+				if grace <= 0 {
+					grace = 100 * time.Millisecond
+				}
+				drainCtx, cancel := context.WithTimeout(context.Background(), grace)
+				p.doFlush(drainCtx, false, batchData)
+				cancel()
+				return errors.Join(ErrContextIsClosed, ErrContextDrained)
+			}
 			return ErrContextIsClosed
 		}
 	}

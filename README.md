@@ -142,9 +142,11 @@ graph TD
 
 ```go
 type PipelineConfig struct {
-    BufferSize    uint32        // Buffer channel capacity (default: 100)
-    FlushSize     uint32        // Maximum batch data capacity (default: 50)
-    FlushInterval time.Duration // Timed flush interval (default: 50ms)
+    BufferSize       uint32        // Buffer channel capacity (default: 100)
+    FlushSize        uint32        // Maximum batch data capacity (default: 50)
+    FlushInterval    time.Duration // Timed flush interval (default: 50ms)
+    DrainOnCancel    bool          // Whether to best-effort flush on cancellation (default false)
+    DrainGracePeriod time.Duration // Max window for the final flush when DrainOnCancel is true
 }
 ```
 
@@ -155,6 +157,217 @@ Based on performance benchmark tests, v2 version adopts optimized default config
 - **BufferSize: 100** - Buffer size, should be >= FlushSize * 2 to avoid blocking
 - **FlushSize: 50** - Batch size, performance tests show around 50 is optimal
 - **FlushInterval: 50ms** - Flush interval, balances latency and throughput
+
+### FlushSize vs BufferSize: Relationship and Tuning
+
+- Roles:
+  - FlushSize: batch size threshold; reaching it triggers a flush (or by FlushInterval).
+  - BufferSize: capacity of input channel; determines how much can be queued without blocking producers.
+- Recommended relation: BufferSize ≥ k × FlushSize, where k ∈ [4, 10] for stable throughput under bursts.
+- Effects of size relation:
+  - BufferSize < FlushSize: frequent timeout-based small batches, lower throughput, higher latency/GC.
+  - BufferSize ≈ 2×FlushSize: generally OK, but sensitive to bursty producers.
+  - BufferSize ≥ 4–10×FlushSize: higher full-batch ratio, better throughput, fewer producer stalls (uses more memory).
+- Coordination with FlushInterval:
+  - FlushInterval bounds tail latency when a batch isn't filled in time.
+  - Too-small BufferSize shifts more flushes to timeout path, shrinking effective batch size.
+
+Sizing recipe based on processing cost:
+- Measure in your flush function:
+  - t_item: average per-item processing time (ns/item).
+  - t_batch: fixed per-batch overhead (ns/batch), e.g., DB round-trip, encoding, etc.
+- Choose amortization target α (e.g., 0.1 means per-batch overhead per item ≤ 10% of per-item cost).
+- Then:
+  - FlushSize ≥ ceil(t_batch / (α × t_item))  // clamp to [32, 128] as a practical range; default 50
+  - BufferSize = k × FlushSize, with k in [4, 10] depending on burstiness and number of producers.
+- Example:
+  - t_item = 2µs, t_batch = 200µs, α = 0.1 ⇒ FlushSize ≥ 200 / (0.1×2) = 1000 ⇒ clamp to 128 if latency-sensitive, or keep 1000 if purely throughput-focused; then BufferSize = 4–10 × FlushSize.
+
+Recommended defaults (balanced latency/throughput):
+- FlushSize: 50
+- BufferSize: 100 (≈ 2×FlushSize; increase to 4–10× under multi-producer bursts)
+- FlushInterval: 50ms
+
+### Cheat Sheet
+
+Quick picks:
+- High throughput:
+  - FlushSize: 64–128 (default 50 is balanced; increase if pure throughput)
+  - BufferSize: 4–10 × FlushSize (higher with more producers/bursts)
+  - FlushInterval: 50–100ms
+- Low latency:
+  - FlushSize: 8–32
+  - BufferSize: ≥ 4 × FlushSize
+  - FlushInterval: 1–10ms (cap tail latency)
+- Memory constrained:
+  - FlushSize: 16–32
+  - BufferSize: 2–4 × FlushSize (bounded by memory budget)
+  - FlushInterval: 50–200ms
+- Multiple producers (N):
+  - Suggest: BufferSize ≥ (4–10) × FlushSize × ceil(N / NumCPU)
+  - Goal: maintain high full-batch ratio and reduce producer stalls under bursts
+
+Formulas:
+- FlushSize ≈ clamp( ceil(t_batch / (α × t_item)), 32, 128 )
+  - t_item: avg per-item cost
+  - t_batch: fixed per-batch overhead (e.g., DB round-trip)
+  - α: amortization target (e.g., 0.1 ⇒ per-batch overhead per item ≤ 10% of t_item)
+- BufferSize = k × FlushSize, k ∈ [4, 10] based on concurrency/burstiness
+- FlushInterval:
+  - latency-bound: FlushInterval ≈ target tail-latency budget
+  - rate-bound: FlushInterval ≈ p99 inter-arrival × FlushSize
+
+Validation checklist:
+- Full-batch ratio ≥ 80%
+- Producer stall rate near 0
+- Stable GC/memory watermark
+- P99/P99.9 E2E latency within SLO
+
+### Tuning Helper (Go)
+
+Use two measurements (N1, N2) to estimate t_item and t_batch, then compute recommended FlushSize/BufferSize:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"time"
+
+	gopipeline "github.com/rushairer/go-pipeline/v2"
+)
+
+// Replace this with your real batch function you're planning to use.
+func batchFunc(ctx context.Context, items []int) error {
+	// Simulate work: per-batch overhead + per-item cost.
+	// Replace with actual logic. Keep it side-effect free for measurement.
+	time.Sleep(200 * time.Microsecond) // t_batch (example)
+	perItem := 2 * time.Microsecond    // t_item (example)
+	time.Sleep(time.Duration(len(items)) * perItem)
+	return nil
+}
+
+func measureOnce(n int, rounds int) time.Duration {
+	items := make([]int, n)
+	var total time.Duration
+	ctx := context.Background()
+	for i := 0; i < rounds; i++ {
+		start := time.Now()
+		_ = batchFunc(ctx, items)
+		total += time.Since(start)
+	}
+	return total / time.Duration(rounds)
+}
+
+func estimateCosts(n1, n2, rounds int) (tItem, tBatch time.Duration) {
+	d1 := measureOnce(n1, rounds)
+	d2 := measureOnce(n2, rounds)
+	// Linear fit: d = t_batch + n * t_item
+	// t_item = (d2 - d1) / (n2 - n1)
+	// t_batch = d1 - n1 * t_item
+	tItem = time.Duration(int64((d2 - d1) / time.Duration(n2-n1)))
+	tBatch = d1 - time.Duration(n1)*tItem
+	if tItem < 0 {
+		tItem = 0
+	}
+	if tBatch < 0 {
+		tBatch = 0
+	}
+	return
+}
+
+func recommend(tItem, tBatch time.Duration, alpha float64, k int) (flush uint32, buffer uint32) {
+	// FlushSize >= ceil(t_batch / (alpha * t_item)), clamped to [32, 128] as a practical default range
+	if tItem <= 0 || alpha <= 0 {
+		return 50, 100 // safe defaults
+	}
+	raw := float64(tBatch) / (alpha * float64(tItem))
+	fs := int(math.Ceil(raw))
+	if fs < 32 {
+		fs = 32
+	}
+	if fs > 128 {
+		// If you're purely throughput-focused, you may keep fs > 128.
+		// For balanced latency, clamp to 128.
+		fs = 128
+	}
+	if k < 1 {
+		k = 4
+	}
+	return uint32(fs), uint32(k * fs)
+}
+
+func main() {
+	// Example measurement with two points
+	n1, n2 := 64, 512
+	rounds := 20
+	tItem, tBatch := estimateCosts(n1, n2, rounds)
+	flush, buffer := recommend(tItem, tBatch, 0.1, 8)
+
+	fmt.Printf("Estimated t_item=%v, t_batch=%v\n", tItem, tBatch)
+	fmt.Printf("Recommended FlushSize=%d, BufferSize=%d (k=8, α=0.1)\n", flush, buffer)
+
+	// Example of using recommended config
+	_ = gopipeline.NewStandardPipeline[int](gopipeline.PipelineConfig{
+		BufferSize:    buffer,
+		FlushSize:     flush,
+		FlushInterval: 50 * time.Millisecond,
+	}, func(ctx context.Context, batch []int) error {
+		return batchFunc(ctx, batch)
+	})
+}
+```
+
+Notes:
+- Replace batchFunc with your real processing. Keep external side effects minimal to reduce noise while measuring.
+- If your measured FlushSize exceeds 128 and you care about latency, clamp to 128; otherwise keep the larger value and increase BufferSize proportionally (k × FlushSize).
+- Re-run measurements on different machines/workloads; cache, IO and network drastically affect t_batch.
+
+### Deduplication Pipeline Tuning
+
+Key points:
+- Effective batch size: After dedup, the actual batch size ≤ FlushSize. If input has high duplication, the effective batch size may be much smaller than FlushSize.
+- Apply the same sizing recipe, but consider uniqueness ratio u ∈ (0,1]:
+  - If pre-dedup batch has N items and u fraction are unique, effective items ≈ u × N.
+  - When computing FlushSize by cost, you may need larger pre-dedup FlushSize so that u × FlushSize ≈ your target effective batch (e.g., ~50).
+- Buffer and interval:
+  - BufferSize: still set BufferSize ≥ k × FlushSize with k in [4,10] to absorb bursts.
+  - FlushInterval: with high duplication, slightly increasing FlushInterval can help accumulate enough unique items to reach target effective batch; balance with latency SLO.
+- Memory note:
+  - Dedup uses a map for the current batch. Map entries add overhead per unique key; prefer reusing value buffers in your flush function to reduce allocations.
+
+Example with duplication:
+- Suppose t_item = 2µs, t_batch = 200µs, α = 0.1 ⇒ cost-based FlushSize_raw = 1000.
+- If uniqueness ratio u ≈ 0.2, effective batch at FlushSize_raw ≈ 200. If you want ≈ 50 effective:
+  - You can clamp FlushSize to 256–512 for latency balance, since u × 256 ≈ 51, or keep larger for throughput.
+  - Set BufferSize = 8 × FlushSize to handle bursts.
+
+### Multi-producer Sizing Example
+
+For N producers on P logical CPUs:
+- Rule of thumb: BufferSize ≥ (4–10) × FlushSize × ceil(N / P).
+- Purpose: keep the consumer flushing with full batches while minimizing producer stalls during bursts.
+
+Numerical example:
+- P=8 CPUs, N=16 producers, target FlushSize=64, choose k=6:
+  - BufferSize ≥ 6 × 64 × ceil(16/8) = 6 × 64 × 2 = 768 (round to 1024 for headroom).
+  - If uniqueness ratio u=0.5 in dedup mode and you need ~64 effective per flush, set FlushSize≈128, then recompute BufferSize.
+
+### Cancellation (ctx.Done) Drain Options
+
+Two optional knobs to balance correctness vs. immediacy on cancellation:
+- DrainOnCancel (bool, default: false):
+  - false: cancel means immediate stop (no final flush)
+  - true: on cancel, perform a best-effort final flush for the current partial batch within a bounded window
+- DrainGracePeriod (time.Duration):
+  - Max time window for the best-effort flush when DrainOnCancel is true (default internal fallback: ~100ms if unset)
+
+Recommended usage:
+- Normal shutdown (preserve data): close the data channel; the pipeline guarantees a final flush of remaining data and exits.
+- Forceful stop: cancel the context with DrainOnCancel=false.
+- Graceful cancel with minimal loss: set DrainOnCancel=true and configure a reasonable DrainGracePeriod (e.g., 50–200ms), noting the flush function should not ignore the new context.
 
 ### Configuration with Default Values
 
@@ -180,6 +393,8 @@ Available configuration methods:
 - `WithBufferSize(size uint32)` - Set buffer size
 - `WithFlushSize(size uint32)` - Set batch size
 - `WithFlushInterval(interval time.Duration)` - Set flush interval
+- `WithDrainOnCancel(enabled bool)` - Enable best-effort final flush on cancel
+- `WithDrainGracePeriod(d time.Duration)` - Set max window for the final flush when DrainOnCancel is enabled
 
 ## 💡 Usage Examples
 
@@ -343,9 +558,9 @@ func main() {
 ```go
 // Create pipeline with custom configuration
 config := gopipeline.PipelineConfig{
-    BufferSize:    200,                    // Buffer size of 200
-    FlushSize:     100,                    // Batch size of 100
-    FlushInterval: time.Millisecond * 100, // 100ms timed flush
+    BufferSize:    100,                   // Recommended balanced default
+    FlushSize:     50,                    // Recommended balanced default
+    FlushInterval: 50 * time.Millisecond, // Recommended balanced default
 }
 
 pipeline := gopipeline.NewStandardPipeline(config, 
@@ -355,6 +570,156 @@ pipeline := gopipeline.NewStandardPipeline(config,
     },
 )
 ```
+
+### Cancellation Drain Example
+
+Two ways to finish a pipeline run:
+
+1) Close the data channel (recommended lossless drain)
+```go
+config := gopipeline.NewPipelineConfig().
+    WithBufferSize(100).
+    WithFlushSize(50).
+    WithFlushInterval(50 * time.Millisecond)
+// DrainOnCancel is irrelevant here; closing the channel guarantees final flush.
+
+p := gopipeline.NewStandardPipeline(config, func(ctx context.Context, batch []string) error {
+    // Your processing
+    return nil
+})
+
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+go func() { _ = p.AsyncPerform(ctx) }()
+
+dataChan := p.DataChan()
+go func() {
+    defer close(dataChan) // writer closes: guarantees a final flush of remaining items
+    for i := 0; i < 1000; i++ {
+        select {
+        case dataChan <- fmt.Sprintf("item-%d", i):
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+```
+
+2) Cancel via context, with best-effort drain on cancel
+```go
+config := gopipeline.NewPipelineConfig().
+    WithBufferSize(100).
+    WithFlushSize(50).
+    WithFlushInterval(50 * time.Millisecond).
+    WithDrainOnCancel(true).                // enable drain on cancel
+    WithDrainGracePeriod(150 * time.Millisecond) // bound the drain time window
+
+p := gopipeline.NewStandardPipeline(config, func(ctx context.Context, batch []string) error {
+    // IMPORTANT: respect ctx; return promptly when ctx.Done() to honor grace window
+    return nil
+})
+
+ctx, cancel := context.WithCancel(context.Background())
+go func() { _ = p.AsyncPerform(ctx) }()
+
+dataChan := p.DataChan()
+// send some data...
+// When you need to stop quickly but still try to flush current partial batch:
+cancel() // pipeline will do one best-effort flush within DrainGracePeriod, then exit
+```
+
+Notes:
+- Close-the-channel path ensures remaining data is flushed regardless of ctx cancellation.
+- Drain-on-cancel is a compromise for fast stop with minimal loss; choose a small DrainGracePeriod (e.g., 50–200ms) and ensure your flush respects the provided context.
+
+### Deduplication Cancellation Drain Example
+
+Two ways to finish a deduplication pipeline run:
+
+1) Close the data channel (recommended lossless drain)
+```go
+config := gopipeline.NewPipelineConfig().
+    WithBufferSize(100).
+    WithFlushSize(50).
+    WithFlushInterval(50 * time.Millisecond)
+
+p := gopipeline.NewDefaultDeduplicationPipeline(func(ctx context.Context, batch map[string]User) error {
+    // Your deduped processing
+    return nil
+})
+
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+go func() { _ = p.AsyncPerform(ctx) }()
+
+ch := p.DataChan()
+go func() {
+    defer close(ch) // writer closes: guarantees a final flush (dedup map is flushed)
+    for i := 0; i < 1000; i++ {
+        select {
+        case ch <- User{ID: fmt.Sprintf("%d", i%200), Name: "N"}: // include duplicates
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+```
+
+2) Cancel via context, with best-effort drain on cancel
+```go
+config := gopipeline.NewPipelineConfig().
+    WithBufferSize(100).
+    WithFlushSize(50).
+    WithFlushInterval(50 * time.Millisecond).
+    WithDrainOnCancel(true).
+    WithDrainGracePeriod(150 * time.Millisecond)
+
+p := gopipeline.NewDefaultDeduplicationPipeline(func(ctx context.Context, batch map[string]User) error {
+    // IMPORTANT: respect ctx; return promptly to honor the grace window
+    return nil
+})
+
+ctx, cancel := context.WithCancel(context.Background())
+go func() { _ = p.AsyncPerform(ctx) }()
+
+ch := p.DataChan()
+// send some data...
+cancel() // pipeline performs a best-effort flush of current dedup map within DrainGracePeriod, then exits
+```
+
+Notes:
+- Dedup mode keeps a map for the current batch; both shutdown strategies ensure the remaining unique entries are flushed.
+- For high-duplication inputs, consider a slightly longer FlushInterval to accumulate enough unique items, balanced with your latency SLO.
+
+### Shutdown semantics
+
+The pipeline can exit via two distinct paths:
+
+- Channel closed:
+  - If the current batch is non-empty, a final synchronous flush is performed with context.Background().
+  - The loop returns nil (graceful shutdown).
+- Context canceled:
+  - DrainOnCancel = false: return ErrContextIsClosed (no final flush).
+  - DrainOnCancel = true: perform one best-effort final synchronous flush under a separate drainCtx with timeout (DrainGracePeriod, default ~100ms if unset). Returns errors.Join(ErrContextIsClosed, ErrContextDrained).
+
+Detect exit conditions via errors.Is:
+```go
+err := pipeline.AsyncPerform(ctx)
+// ...
+if errors.Is(err, ErrContextIsClosed) {
+    // Exited due to context cancellation
+}
+if errors.Is(err, ErrContextDrained) {
+    // A best-effort final drain flush was performed on cancel
+}
+// On channel-close path, err == nil (graceful shutdown)
+```
+
+Notes:
+- The final drain flush is executed synchronously to avoid races on shutdown.
+- Your flush function should respect the provided context (drainCtx) and return promptly.
 
 ## 🎯 Use Cases
 
