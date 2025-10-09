@@ -90,7 +90,6 @@ func TestStandard_Cancel_WithDrain_FlushesPartial(t *testing.T) {
 	}
 
 	// 直接取消，触发 drain-on-cancel
-	time.Sleep(1 * time.Second)
 	cancel()
 
 	// 等待退出并断言错误组合
@@ -107,7 +106,7 @@ func TestStandard_Cancel_WithDrain_FlushesPartial(t *testing.T) {
 	}
 
 	// 等待在宽限期内 flush 完成
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(1 * time.Second)
 	for {
 		if atomic.LoadInt64(&processed) == 10 {
 			break
@@ -135,6 +134,8 @@ func TestStandard_CloseChannel_AlwaysFlush(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	errCh := make(chan error, 1)
 	go func() { errCh <- p.AsyncPerform(ctx) }()
 
@@ -144,7 +145,6 @@ func TestStandard_CloseChannel_AlwaysFlush(t *testing.T) {
 	}
 	// 先关闭通道，再取消 ctx；应保证 flush 发生（实现中用 context.Background() 执行最终 flush）
 	close(ch)
-	cancel()
 
 	deadline := time.After(1 * time.Second)
 	for {
@@ -286,6 +286,8 @@ func TestDedup_CloseChannel_AlwaysFlush(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	errCh := make(chan error, 1)
 	go func() { errCh <- p.AsyncPerform(ctx) }()
 
@@ -294,7 +296,6 @@ func TestDedup_CloseChannel_AlwaysFlush(t *testing.T) {
 		ch <- user{id: fmt.Sprintf("%d", i%3)}
 	}
 	close(ch)
-	cancel()
 
 	deadline := time.After(1 * time.Second)
 	for {

@@ -113,18 +113,45 @@ func (p *PipelineImpl[T]) performLoop(
 		case <-ctx.Done():
 			// 取消退出语义：
 			// - DrainOnCancel=false：不做最终 flush，返回 ErrContextIsClosed（可用 errors.Is(err, ErrContextIsClosed) 判断）
-			// - DrainOnCancel=true：若批次非空，在独立的、带超时的 drainCtx 下同步执行一次最终 flush；
+			// - DrainOnCancel=true：尽力将当前通道缓冲中的数据吸入批并在独立 drainCtx 下同步 flush；
 			//   返回 errors.Join(ErrContextIsClosed, ErrContextDrained)：
-			//     * errors.Is(err, ErrContextIsClosed) == true → 因上下文取消退出
+			//     * errors.Is(err, ErrContextIsClosed) == true → 因取消退出
 			//     * errors.Is(err, ErrContextDrained)  == true → 已执行限时收尾
-			if p.config.DrainOnCancel && !p.processor.isBatchEmpty(batchData) {
+			if p.config.DrainOnCancel {
+				// 1) 独立的收尾上下文，避免被原 ctx 立即打断
 				grace := p.config.DrainGracePeriod
 				if grace <= 0 {
 					grace = 100 * time.Millisecond
 				}
 				drainCtx, cancel := context.WithTimeout(context.Background(), grace)
-				p.doFlush(drainCtx, false, batchData)
+
+				// 2) 非阻塞地抽干当前通道缓冲中的数据，尽量纳入批（避免阻塞/无限等待）
+				// 注意：仅在取消瞬间把“已缓冲”的项尽力带走；不会主动长期拉取新生产的数据。
+				for {
+					select {
+					case v, ok := <-p.dataChan:
+						if !ok {
+							// 通道已关闭，关闭路径已有最终 flush 保障，这里直接跳出
+							goto DRAIN_DONE
+						}
+						batchData = p.processor.addToBatch(batchData, v)
+						if p.processor.isBatchFull(batchData) {
+							// 批满则立即同步 flush，以免超过 grace 时间
+							p.doFlush(drainCtx, false, batchData)
+							batchData = p.processor.initBatchData()
+						}
+					default:
+						// 通道当前没有更多缓冲项（非阻塞抽干结束）
+						goto DRAIN_DONE
+					}
+				}
+			DRAIN_DONE:
+				// 3) 执行最后一次同步 flush（若批非空）
+				if !p.processor.isBatchEmpty(batchData) {
+					p.doFlush(drainCtx, false, batchData)
+				}
 				cancel()
+				// 4) 返回“取消且已收尾”的组合错误
 				return errors.Join(ErrContextIsClosed, ErrContextDrained)
 			}
 			return ErrContextIsClosed
