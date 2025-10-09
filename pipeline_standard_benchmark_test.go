@@ -240,7 +240,6 @@ func BenchmarkPipelineMemoryEfficiency(b *testing.B) {
 	for atomic.LoadInt64(&processedCount) < int64(b.N) {
 		time.Sleep(time.Microsecond * 100)
 	}
-	cancel()
 }
 
 // BenchmarkPipelineAsyncVsSync 比较异步和同步处理性能
@@ -297,7 +296,6 @@ func BenchmarkPipelineAsyncVsSync(b *testing.B) {
 			b.StopTimer()
 
 			close(dataChan)
-			cancel()
 
 			for atomic.LoadInt64(&processedCount) < int64(b.N) {
 				time.Sleep(time.Microsecond * 100)
@@ -356,7 +354,6 @@ func BenchmarkPipelineConcurrentProducers(b *testing.B) {
 			b.StopTimer()
 
 			close(dataChan)
-			cancel()
 
 			expectedItems := itemsPerProducer * producerCount
 			for atomic.LoadInt64(&processedCount) < int64(expectedItems) {
