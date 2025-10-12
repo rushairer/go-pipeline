@@ -64,7 +64,8 @@ func NewDeduplicationPipeline[T UniqueKeyData](
 // initBatchData 初始化一个新的批处理数据切片
 // 返回值: 返回一个空的类型T切片
 func (p *DeduplicationPipeline[T]) initBatchData() any {
-	return make(map[string]T)
+	// 预分配容量，减少哈希表扩容/rehash
+	return make(map[string]T, int(p.config.FlushSize))
 }
 
 // addToBatch 将新数据添加到批处理容器中
@@ -76,7 +77,7 @@ func (p *DeduplicationPipeline[T]) initBatchData() any {
 // 说明:
 //   - 该方法将新数据添加到批处理容器中，键为数据的唯一标识，值为对应的数据对象
 //   - 如果新数据的键已存在，则会覆盖原有数据，实现去重效果
-//   - 该方法是线程安全的，可在并发环境中使用
+//   - 注意：该方法在单消费者事件循环内是安全的；并非可在多协程并发写 map 的线程安全结构
 func (p *DeduplicationPipeline[T]) addToBatch(batchData any, data T) any {
 	bd := batchData.(map[string]T)
 	bd[data.GetKey()] = data
@@ -109,4 +110,20 @@ func (p *DeduplicationPipeline[T]) isBatchFull(batchData any) bool {
 // 返回值: 如果数据切片长度小于1则返回true
 func (p *DeduplicationPipeline[T]) isBatchEmpty(batchData any) bool {
 	return len(batchData.(map[string]T)) < 1
+}
+
+// ResetBatchData 在 flush 成功后重置批容器以便复用（减少分配/GC）
+// 行为：
+// - 当配置 UseMapReuse=true 时，清空 map 以复用其容量
+// - 当配置 UseMapReuse=false（默认）时，按 FlushSize 新建 map（保持既有行为与语义）
+func (p *DeduplicationPipeline[T]) ResetBatchData(batchData any) any {
+	m := batchData.(map[string]T)
+	if p.config.UseMapReuse {
+		for k := range m {
+			delete(m, k)
+		}
+		return m
+	}
+	// 保持原始策略：新建容器（兼容旧行为）
+	return make(map[string]T, int(p.config.FlushSize))
 }

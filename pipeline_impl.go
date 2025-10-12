@@ -4,12 +4,24 @@ import (
 	"context"
 	"errors"
 	"log"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // PipelineImpl 实现了通用的管道功能
 // 该结构体提供了管道操作的基础实现，包括数据缓冲、批处理和定时刷新等功能
+type MetricsHook interface {
+	// Flush 在一次 flush 完成后被调用
+	// items: 本次批次大小；duration: 执行耗时
+	Flush(items int, duration time.Duration)
+	// Error 在错误成功写入错误通道时调用
+	Error(err error)
+	// ErrorDropped 在错误通道满导致错误被丢弃时调用
+	ErrorDropped()
+}
+
 type PipelineImpl[T any] struct {
 	// config 存储管道的配置信息
 	config PipelineConfig
@@ -21,6 +33,18 @@ type PipelineImpl[T any] struct {
 	errorChan chan error
 	// errOnce 确保错误通道只初始化一次（用于 ErrorChan 的懒加载）
 	errOnce sync.Once
+
+	// 运行状态与并发控制
+	running  int32         // 0=未运行, 1=运行中（并发启动保护）
+	flushSem chan struct{} // 异步 flush 并发上限（nil 表示不限制）
+
+	// 可选注入：日志与指标
+	logger  *log.Logger
+	metrics MetricsHook
+
+	// 最近一次运行的完成信号（Done）
+	runMu   sync.Mutex
+	runDone chan struct{}
 }
 
 // 确保 PipelineImpl 实现了 Performer 接口
@@ -39,12 +63,18 @@ func NewPipelineImpl[T any](
 	config PipelineConfig,
 	processor DataProcessor[T],
 ) *PipelineImpl[T] {
-	return &PipelineImpl[T]{
+	// 规范化配置（与 ValidateOrDefault 一致）
+	config = config.ValidateOrDefault()
+	p := &PipelineImpl[T]{
 		config:    config,
 		dataChan:  make(chan T, config.BufferSize),
 		processor: processor,
 		errorChan: nil,
 	}
+	if config.MaxConcurrentFlushes > 0 {
+		p.flushSem = make(chan struct{}, int(config.MaxConcurrentFlushes))
+	}
+	return p
 }
 
 func (p *PipelineImpl[T]) DataChan() chan<- T {
@@ -83,6 +113,25 @@ func (p *PipelineImpl[T]) performLoop(
 	ctx context.Context,
 	async bool,
 ) error {
+	// 防并发启动：同一实例不允许并发运行
+	if !atomic.CompareAndSwapInt32(&p.running, 0, 1) {
+		return ErrAlreadyRunning
+	}
+	// 设置本次运行的 Done 通道
+	p.runMu.Lock()
+	p.runDone = make(chan struct{})
+	p.runMu.Unlock()
+	defer func() {
+		// 运行结束：恢复运行状态并发出完成信号
+		atomic.StoreInt32(&p.running, 0)
+
+		p.runMu.Lock()
+		if p.runDone != nil {
+			close(p.runDone)
+		}
+		p.runMu.Unlock()
+	}()
+
 	ticker := time.NewTicker(p.config.FlushInterval)
 	defer ticker.Stop()
 
@@ -94,7 +143,16 @@ func (p *PipelineImpl[T]) performLoop(
 			if !ok {
 				// 数据通道已关闭：最终刷新未满批次后退出
 				if !p.processor.isBatchEmpty(batchData) {
-					p.doFlush(context.Background(), false, batchData)
+					// 使用 FinalFlushOnCloseTimeout 限时最终 flush（0 表示不限时，保持 Background）
+					ctxClose := context.Background()
+					if p.config.FinalFlushOnCloseTimeout > 0 {
+						var cancel context.CancelFunc
+						ctxClose, cancel = context.WithTimeout(context.Background(), p.config.FinalFlushOnCloseTimeout)
+						p.doFlush(ctxClose, false, batchData)
+						cancel()
+					} else {
+						p.doFlush(ctxClose, false, batchData)
+					}
 				}
 				return nil
 			}
@@ -103,13 +161,13 @@ func (p *PipelineImpl[T]) performLoop(
 				continue
 			}
 			p.doFlush(ctx, async, batchData)
-			batchData = p.processor.initBatchData()
+			batchData = p.processor.ResetBatchData(batchData)
 		case <-ticker.C:
 			if p.processor.isBatchEmpty(batchData) {
 				continue
 			}
 			p.doFlush(ctx, async, batchData)
-			batchData = p.processor.initBatchData()
+			batchData = p.processor.ResetBatchData(batchData)
 		case <-ctx.Done():
 			// 取消退出语义：
 			// - DrainOnCancel=false：不做最终 flush，返回 ErrContextIsClosed（可用 errors.Is(err, ErrContextIsClosed) 判断）
@@ -138,7 +196,7 @@ func (p *PipelineImpl[T]) performLoop(
 						if p.processor.isBatchFull(batchData) {
 							// 批满则立即同步 flush，以免超过 grace 时间
 							p.doFlush(drainCtx, false, batchData)
-							batchData = p.processor.initBatchData()
+							batchData = p.processor.ResetBatchData(batchData)
 						}
 					default:
 						// 通道当前没有更多缓冲项（非阻塞抽干结束）
@@ -178,7 +236,16 @@ func (p *PipelineImpl[T]) doFlush(
 	batchData any,
 ) {
 	if async {
-		go p.flushWithErrorChan(ctx, batchData)
+		// 若设置了并发上限，则使用信号量限制在飞 flush goroutine 数
+		if p.flushSem != nil {
+			p.flushSem <- struct{}{}
+			go func() {
+				defer func() { <-p.flushSem }()
+				p.flushWithErrorChan(ctx, batchData)
+			}()
+		} else {
+			go p.flushWithErrorChan(ctx, batchData)
+		}
 	} else {
 		p.flushWithErrorChan(ctx, batchData)
 	}
@@ -191,18 +258,36 @@ func (p *PipelineImpl[T]) doFlush(
 func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Println("panic recovered in pipeline: ", r)
+			if p.logger != nil {
+				p.logger.Println("panic recovered in pipeline: ", r)
+			} else {
+				log.Println("panic recovered in pipeline: ", r)
+			}
 		}
 	}()
 
-	if err := p.processor.flush(ctx, batchData); err != nil {
+	start := time.Now()
+	err := p.processor.flush(ctx, batchData)
+	dur := time.Since(start)
+
+	// metrics: flush
+	if p.metrics != nil {
+		p.metrics.Flush(batchLen(batchData), dur)
+	}
+
+	if err != nil {
 		// 安全地发送错误到错误通道
 		p.safeErrorSend(err)
+		// metrics: error
+		if p.metrics != nil {
+			p.metrics.Error(err)
+		}
 	}
 }
 
 // 计算默认错误通道缓冲区大小
 func (p *PipelineImpl[T]) defaultErrBufSize() int {
+	// Keep original proportional behavior to preserve backward compatibility and tests
 	return int((p.config.FlushSize + p.config.BufferSize - 1) / p.config.BufferSize)
 }
 
@@ -218,15 +303,15 @@ func (p *PipelineImpl[T]) safeErrorSend(err error) {
 	_ = p.ErrorChan(0) // 确保已初始化，并获取同一实例的快照
 
 	// 使用非阻塞发送，避免阻塞管道处理
-	go func() {
-		select {
-		case p.errorChan <- err:
-			// 错误发送成功
-		default:
-			// 错误通道已满，跳过此错误
-			// 可以在这里添加日志记录
+	select {
+	case p.errorChan <- err:
+		// sent
+	default:
+		// buffer full, drop
+		if p.metrics != nil {
+			p.metrics.ErrorDropped()
 		}
-	}()
+	}
 }
 
 // ErrorChan 返回一个只读的错误通道，用于接收管道处理过程中的错误
@@ -244,6 +329,41 @@ func (p *PipelineImpl[T]) safeErrorSend(err error) {
 //	    for err := range ch {
 //	        log.Println("pipeline error:", err)
 //	    }
+
+// WithLogger 注入日志器（可选）
+func (p *PipelineImpl[T]) WithLogger(l *log.Logger) *PipelineImpl[T] {
+	p.logger = l
+	return p
+}
+
+// WithMetrics 注入指标钩子（可选）
+func (p *PipelineImpl[T]) WithMetrics(h MetricsHook) *PipelineImpl[T] {
+	p.metrics = h
+	return p
+}
+
+// Done 返回最近一次调用 Perform（Sync/Async）的完成信号通道
+// 注意：该通道在每次 Perform 启动时都会被替换；并发多次启动时语义未定义
+func (p *PipelineImpl[T]) Done() <-chan struct{} {
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
+	return p.runDone
+}
+
+// 计算批次长度（通过反射支持 slice/map）
+func batchLen(batch any) int {
+	if batch == nil {
+		return 0
+	}
+	v := reflect.ValueOf(batch)
+	switch v.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map, reflect.String:
+		return v.Len()
+	default:
+		return 0
+	}
+}
+
 //	}()
 //	// 如果不关心自定义容量，可在执行前或读取前调用 p.ErrorChan(0)
 //
@@ -259,4 +379,35 @@ func (p *PipelineImpl[T]) ErrorChan(size int) <-chan error {
 		p.errorChan = make(chan error, n)
 	})
 	return p.errorChan
+}
+
+// Start 启动异步执行，返回本次运行的完成信号和错误通道。
+// 注意：为了避免返回 nil 的 done，这里在启动后短暂自旋等待 runDone 就绪（最小侵入实现）。
+func (p *PipelineImpl[T]) Start(ctx context.Context) (<-chan struct{}, <-chan error) {
+	errs := p.ErrorChan(0)
+
+	// 异步启动，并将可能出现的错误（如 ErrAlreadyRunning）送入错误通道
+	go func() {
+		if err := p.AsyncPerform(ctx); err != nil {
+			p.safeErrorSend(err)
+		}
+	}()
+
+	// 尝试等待 runDone 就绪，避免返回 nil
+	var done <-chan struct{}
+	for i := 0; i < 10; i++ {
+		if d := p.Done(); d != nil {
+			done = d
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return done, errs
+}
+
+// Run 同步运行至结束，同时允许指定错误通道容量（便于在调用前设置容量）。
+// 注意：Run 不消费错误通道，仅负责初始化容量并同步执行，错误由调用方按需读取。
+func (p *PipelineImpl[T]) Run(ctx context.Context, errBuf int) error {
+	_ = p.ErrorChan(errBuf)
+	return p.SyncPerform(ctx)
 }

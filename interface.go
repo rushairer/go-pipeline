@@ -34,6 +34,10 @@ type DataProcessor[T any] interface {
 	//   - batchData: 要检查的批处理数据容器
 	// 返回值: 如果批处理数据为空则返回true
 	isBatchEmpty(batchData any) bool
+
+	// ResetBatchData 在 flush 成功后重置批容器以便复用（减少分配/GC）
+	// 返回值: 返回可继续使用的容器；默认实现可选择新建（保持兼容）
+	ResetBatchData(batchData any) any
 }
 
 // PipelineChannel 定义了管道的通道接口

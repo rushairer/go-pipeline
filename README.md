@@ -395,6 +395,128 @@ Available configuration methods:
 - `WithFlushInterval(interval time.Duration)` - Set flush interval
 - `WithDrainOnCancel(enabled bool)` - Enable best-effort final flush on cancel
 - `WithDrainGracePeriod(d time.Duration)` - Set max window for the final flush when DrainOnCancel is enabled
+- `ValidateOrDefault()` - Validate fields and fill safe defaults (constructor also applies defaults)
+
+## Convenience APIs: Start and Run
+
+These helper methods reduce boilerplate by wrapping AsyncPerform/SyncPerform, Done and ErrorChan handling.
+
+- When to use:
+  - Start(ctx): prefer for async runs; returns done and errs channel; you still decide how to consume errs.
+  - Run(ctx, errBuf): prefer for sync runs; initializes error buffer size and blocks until exit, returning the final error.
+
+- Error channel capacity:
+  - The first call to ErrorChan(size) decides the buffer size; later calls ignore size.
+  - If you never call it, the pipeline will create a default one on first internal send.
+
+- Concurrency constraint:
+  - The same pipeline instance must not be started concurrently; a second start returns ErrAlreadyRunning (delivered via error channel in Start).
+
+Examples
+
+Async start (Start)
+```go
+done, errs := pipeline.Start(ctx)
+
+// consume errors (recommended)
+go func() {
+    for {
+        select {
+        case err, ok := <-errs:
+            if !ok {
+                return
+            }
+            log.Printf("pipeline error: %v", err)
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+
+// send data
+ch := pipeline.DataChan()
+go func() {
+    defer close(ch) // writer closes
+    for _, x := range items {
+        select {
+        case ch <- x:
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+
+<-done // wait for this run to finish
+```
+
+Sync run (Run)
+```go
+// Initialize error channel capacity (e.g., 128) and run synchronously
+if err := pipeline.Run(ctx, 128); err != nil {
+    if errors.Is(err, gopipeline.ErrContextIsClosed) {
+        // exited due to context cancellation
+    }
+}
+```
+
+Notes
+- Start may deliver a second concurrent start attempt as ErrAlreadyRunning via errs.
+- You may choose not to consume errs; if the buffer fills, new errors are dropped (non-blocking, no panic).
+- DataChan() follows "writer closes". Close it when you want a lossless final flush and graceful exit.
+- For multiple runs on the same instance, do NOT close the data channel between runs; control lifecycle with context.
+
+## Migration to Start/Run
+
+Before (manual wiring)
+```go
+// Manual: start goroutine, init ErrorChan, wait on Done
+errs := pipeline.ErrorChan(128)
+go func() { _ = pipeline.AsyncPerform(ctx) }()
+
+go func() {
+    for {
+        select {
+        case err, ok := <-errs:
+            if !ok {
+                return
+            }
+            log.Printf("pipeline error: %v", err)
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+
+// send data ...
+<-pipeline.Done()
+```
+
+After (using Start/Run)
+```go
+// Async, minimal boilerplate
+done, errs := pipeline.Start(ctx)
+go func() {
+    for {
+        select {
+        case err, ok := <-errs:
+            if !ok {
+                return
+            }
+            log.Printf("pipeline error: %v", err)
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+<-done
+
+// Or sync run with explicit error buffer
+if err := pipeline.Run(ctx, 128); err != nil {
+    if errors.Is(err, gopipeline.ErrContextIsClosed) {
+        // canceled
+    }
+}
+```
 
 ## 💡 Usage Examples
 
@@ -695,6 +817,41 @@ Notes:
 
 ### Shutdown semantics
 
+FinalFlushOnCloseTimeout
+- On the channel-close path, the pipeline performs a final synchronous flush for the remaining batch.
+- If config.FinalFlushOnCloseTimeout > 0, the final flush is executed under a context with timeout; otherwise, it uses context.Background().
+- Your flush function should respect the provided context to ensure timely exit on timeout.
+
+Example:
+```go
+cfg := gopipeline.NewPipelineConfig().
+    WithFlushSize(50).
+    WithBufferSize(100).
+    WithFinalFlushOnCloseTimeout(150 * time.Millisecond)
+
+p := gopipeline.NewStandardPipeline(cfg, func(ctx context.Context, batch []Item) error {
+    // IMPORTANT: respect ctx; abort promptly on ctx.Done()
+    return writeBatch(ctx, batch)
+})
+
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+go func() { _ = p.AsyncPerform(ctx) }()
+
+ch := p.DataChan()
+go func() {
+    defer close(ch) // writer closes: triggers final flush under timeout
+    for _, it := range items {
+        select {
+        case ch <- it:
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+```
+
 The pipeline can exit via two distinct paths:
 
 - Channel closed:
@@ -933,6 +1090,8 @@ BatchSize500: 198.6 ns/op  (Batch too large)
 
 ## ⚠️ Important Notes
 
+> AsyncPerform flush ordering: callbacks may execute out of order across flushes. Do not rely on cross-batch ordering.
+
 > **Error Channel Behavior**: Lazily initialized via sync.Once. The first call to `ErrorChan(size int)` decides the buffer size; subsequent calls ignore size. Even if you don't explicitly call it, the pipeline will initialize it on first error send and write errors non-blockingly. If the channel isn't consumed and the buffer fills, subsequent errors are dropped (no blocking or panic).
 
 > **Recommended to Listen to Error Channel**: If you call `ErrorChan(size int)`, it's recommended to listen to the error channel and use select statements to avoid infinite waiting.
@@ -1010,6 +1169,27 @@ v2 version provides a robust error handling mechanism with lazy initialization a
 - **Buffer Full Handling**: When the buffer is full, new errors are discarded instead of blocking; no panic occurs.
 
 #### 📋 Usage Methods
+
+Exit template for error channel consumption (avoid range):
+Use an upper-level context to stop the reader goroutine; don't range over the channel since it stays open during runs.
+
+```go
+errs := pipeline.ErrorChan(10)
+
+go func(ctx context.Context, errs <-chan error) {
+    for {
+        select {
+        case err, ok := <-errs:
+            if !ok {
+                return
+            }
+            log.Printf("processing error: %v", err)
+        case <-ctx.Done():
+            return
+        }
+    }
+}(ctx, errs)
+```
 
 **Method 1: Listen to Errors (Recommended)**
 ```go
@@ -1120,6 +1300,15 @@ Deduplication pipeline adds the following performance characteristics on top of 
 - Deduplication Pipeline: ~260 ns/op (about 15% overhead increase)
 
 ## ❓ Frequently Asked Questions (FAQ)
+
+Q: What happens if I start the same pipeline concurrently?
+A: Concurrent starts are not allowed. The second attempt will fail with ErrAlreadyRunning.
+- Start(ctx): the error is delivered via the returned errs channel.
+- AsyncPerform/SyncPerform: the method returns ErrAlreadyRunning immediately.
+
+Q: How is the ErrorChan buffer size determined?
+A: The first call to ErrorChan(size) decides the buffer size; later calls ignore size. Best practice: call ErrorChan with your desired size before starting the run. If you never call it, a default size is created on first internal send. If nobody consumes and the buffer fills, subsequent errors are dropped (non-blocking, no panic).
+
 
 ### Q: How to choose appropriate configuration parameters?
 

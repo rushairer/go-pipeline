@@ -16,6 +16,26 @@ type PipelineConfig struct {
 	// DrainGracePeriod 启用 DrainOnCancel 时用于收尾刷新的最长时间窗口
 	// 若未设置或 <=0，将在使用时采用一个保守的短时默认值
 	DrainGracePeriod time.Duration
+	// MaxConcurrentFlushes 限制异步 flush 的最大并发数（0 表示不限制）
+	MaxConcurrentFlushes uint32
+	// UseMapReuse 启用去重批次 map 复用（true：flush 后清空复用；false：flush 后新建）
+	UseMapReuse bool
+	// FinalFlushOnCloseTimeout 关闭数据通道路径的“最终 flush”超时（0 表示不限时，使用 Background）
+	FinalFlushOnCloseTimeout time.Duration
+}
+
+// ValidateOrDefault 规范化配置：非法/未设置值回退到默认
+func (c PipelineConfig) ValidateOrDefault() PipelineConfig {
+	if c.FlushInterval <= 0 {
+		c.FlushInterval = defaultFlushInterval
+	}
+	if c.BufferSize == 0 {
+		c.BufferSize = defaultBufferSize
+	}
+	if c.FlushSize == 0 {
+		c.FlushSize = defaultFlushSize
+	}
+	return c
 }
 
 const (
@@ -30,11 +50,14 @@ const (
 // NewPipelineConfig 创建一个带默认值的配置
 func NewPipelineConfig() PipelineConfig {
 	return PipelineConfig{
-		BufferSize:       defaultBufferSize,
-		FlushSize:        defaultFlushSize,
-		FlushInterval:    defaultFlushInterval,
-		DrainOnCancel:    defaultDrainOnCancel,
-		DrainGracePeriod: defaultDrainGracePeriod,
+		BufferSize:               defaultBufferSize,
+		FlushSize:                defaultFlushSize,
+		FlushInterval:            defaultFlushInterval,
+		DrainOnCancel:            defaultDrainOnCancel,
+		DrainGracePeriod:         defaultDrainGracePeriod,
+		MaxConcurrentFlushes:     0,
+		UseMapReuse:              false,
+		FinalFlushOnCloseTimeout: 0,
 	}
 }
 
@@ -65,5 +88,23 @@ func (c PipelineConfig) WithDrainOnCancel(enabled bool) PipelineConfig {
 // WithDrainGracePeriod 设置收尾刷新的最长时间窗口（仅在 DrainOnCancel 启用时生效）
 func (c PipelineConfig) WithDrainGracePeriod(d time.Duration) PipelineConfig {
 	c.DrainGracePeriod = d
+	return c
+}
+
+// WithMaxConcurrentFlushes 设置异步 flush 的最大并发数（0 表示不限制）
+func (c PipelineConfig) WithMaxConcurrentFlushes(n uint32) PipelineConfig {
+	c.MaxConcurrentFlushes = n
+	return c
+}
+
+// WithUseMapReuse 启用/关闭去重批次 map 复用
+func (c PipelineConfig) WithUseMapReuse(enabled bool) PipelineConfig {
+	c.UseMapReuse = enabled
+	return c
+}
+
+// WithFinalFlushOnCloseTimeout 设置关闭数据通道路径最终 flush 的超时（0 表示不限时）
+func (c PipelineConfig) WithFinalFlushOnCloseTimeout(d time.Duration) PipelineConfig {
+	c.FinalFlushOnCloseTimeout = d
 	return c
 }

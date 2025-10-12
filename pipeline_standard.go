@@ -55,7 +55,8 @@ func NewStandardPipeline[T any](
 // initBatchData 初始化一个新的批处理数据切片
 // 返回值: 返回一个空的类型T切片
 func (p *StandardPipeline[T]) initBatchData() any {
-	return make([]T, 0)
+	// 预分配容量以减少扩容与分配
+	return make([]T, 0, int(p.config.FlushSize))
 }
 
 // addToBatch 将新数据添加到批处理数据切片中
@@ -94,4 +95,15 @@ func (p *StandardPipeline[T]) isBatchFull(batchData any) bool {
 // 返回值: 如果数据切片长度小于1则返回true
 func (p *StandardPipeline[T]) isBatchEmpty(batchData any) bool {
 	return len(batchData.([]T)) < 1
+}
+
+// ResetBatchData 在 flush 成功后重置批容器以便复用（减少分配/GC）
+func (p *StandardPipeline[T]) ResetBatchData(batchData any) any {
+	b := batchData.([]T)
+	// 若当前容量不足以满足期望的 FlushSize，则按 FlushSize 重新分配
+	if cap(b) < int(p.config.FlushSize) {
+		return make([]T, 0, int(p.config.FlushSize))
+	}
+	// 直接重切零长复用已有底层数组
+	return b[:0]
 }
