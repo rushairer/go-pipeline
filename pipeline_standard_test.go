@@ -23,7 +23,7 @@ func TestStandardPipelineAsyncPerform(t *testing.T) {
 			case <-ctx.Done():
 				return nil
 			default:
-				// AsyncPerform 时可以是 flush 无序更加明显
+				// AsyncPerform 时可以使 flush 无序更加明显
 				time.Sleep(time.Millisecond * 10)
 				mux.Lock()
 				processedCount += len(batchData)
@@ -86,8 +86,8 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 	var errorCount int
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			BufferSize:    32,
-			FlushSize:     64,
+			BufferSize:    64,
+			FlushSize:     32,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []int) error {
@@ -159,6 +159,7 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 }
 
 // TestStandardPipelineAsyncPerformTimeout 测试异步执行超时场景
+// dataChan 会在写入完成后被 close
 func TestStandardPipelineAsyncPerformTimeout(t *testing.T) {
 	var mux sync.Mutex
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
@@ -167,8 +168,8 @@ func TestStandardPipelineAsyncPerformTimeout(t *testing.T) {
 	var processedCount int
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			BufferSize:    32,
-			FlushSize:     64,
+			BufferSize:    64,
+			FlushSize:     32,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []int) error {
@@ -241,8 +242,8 @@ func TestStandardPipelineSyncPerform(t *testing.T) {
 	var processedCount int
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			BufferSize:    32,
-			FlushSize:     64,
+			BufferSize:    64,
+			FlushSize:     32,
 			FlushInterval: time.Millisecond * 100,
 		},
 		func(ctx context.Context, batchData []int) error {
@@ -366,8 +367,8 @@ func TestStandardPipelineSyncPerformRestart(t *testing.T) {
 
 	pipeline := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
-			BufferSize:    16,
-			FlushSize:     32,
+			BufferSize:    32,
+			FlushSize:     16,
 			FlushInterval: time.Millisecond * 50,
 		},
 		func(ctx context.Context, batchData []int) error {
