@@ -111,19 +111,3 @@ func (p *DeduplicationPipeline[T]) isBatchFull(batchData any) bool {
 func (p *DeduplicationPipeline[T]) isBatchEmpty(batchData any) bool {
 	return len(batchData.(map[string]T)) < 1
 }
-
-// ResetBatchData 在 flush 成功后重置批容器以便复用（减少分配/GC）
-// 行为：
-// - 当配置 UseMapReuse=true 时，清空 map 以复用其容量
-// - 当配置 UseMapReuse=false（默认）时，按 FlushSize 新建 map（保持既有行为与语义）
-func (p *DeduplicationPipeline[T]) ResetBatchData(batchData any) any {
-	m := batchData.(map[string]T)
-	if p.config.UseMapReuse {
-		for k := range m {
-			delete(m, k)
-		}
-		return m
-	}
-	// 保持原始策略：新建容器（兼容旧行为）
-	return make(map[string]T, int(p.config.FlushSize))
-}

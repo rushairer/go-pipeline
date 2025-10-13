@@ -1483,6 +1483,13 @@ go func() {
 - batch_size_observed_p50/p95/p99：实际处理批次大小的分布
 - flush_latency_p50/p95/p99：flush 处理耗时的分布
 
+### Q: 为什么在异步模式下更推荐使用 initBatchData 而不是 ResetBatchData？
+**A:** 在 AsyncPerform 模式下，每次 flush 都在独立 goroutine 中执行。如果复用同一底层缓冲并对批容器做 Reset（如对切片使用 slice[:0]）的同时，上一轮 flush 的 goroutine 仍然持有该容器的引用，就会因为共享底层存储而产生数据错乱或丢失。
+- 异步（并发 flush）：请将“当前批容器”移交给 flush 的 goroutine，并为后续累计“新建一个容器”（initBatchData 或从对象池获取）。这样可确保两个 goroutine 不会共享同一底层数组/映射。
+- 同步（串行 flush）：flush 在当前 goroutine 内完成，使用 ResetBatchData 复用同一容器是安全的。
+- 实践建议：异步场景优先采用“偷换容器”（steal-and-replace）策略——旧容器短暂逃逸到 flush goroutine，新的容器立即开始累积。可结合 sync.Pool 等手段降低分配抖动。
+- 去重模式（map）：同理，不要清空仍被 flush goroutine 读取的 map；应将 map 直接移交，并为新的累计创建一个新 map。
+
 ### Q: 如何选择合适的配置参数？
 
 **A:** 基于性能测试的配置建议：

@@ -103,9 +103,14 @@ func (p *PipelineImpl[T]) SyncPerform(ctx context.Context) error {
 	return err
 }
 
-// performLoop 实现了通用的执行循环逻辑
-// 该方法维护了一个事件循环，负责从通道中读取数据并进行批处理
-// 支持同步和异步两种处理模式，并具有定时刷新机制
+/*
+performLoop 实现了通用的执行循环逻辑
+- 异步 vs 同步的批容器语义：
+  - AsyncPerform（并发 flush）：在将当前批次交给 doFlush 运行的 goroutine 后，应“分离”当前容器并为后续累计创建新容器（initBatchData 或等价策略）。
+    这样可避免与异步 goroutine 共享同一底层存储（slice/map），否则使用 ResetBatchData（如 slice[:0]）清空时会与 flush 重叠，导致数据错乱或丢失。
+  - SyncPerform（串行 flush）：flush 在当前 goroutine 完成，使用 ResetBatchData 复用容器是安全的。
+  - 实践建议：异步路径优先采用“偷换容器（steal-and-replace）”，可结合对象池降低分配；同步路径可用 ResetBatchData 以减少分配。
+*/
 // 参数:
 //   - ctx: 上下文对象，用于控制操作的生命周期
 //   - async: 是否使用异步模式处理数据
@@ -167,13 +172,13 @@ func (p *PipelineImpl[T]) performLoop(
 				continue
 			}
 			p.doFlush(ctx, async, batchData)
-			batchData = p.processor.ResetBatchData(batchData)
+			batchData = p.processor.initBatchData()
 		case <-ticker.C:
 			if p.processor.isBatchEmpty(batchData) {
 				continue
 			}
 			p.doFlush(ctx, async, batchData)
-			batchData = p.processor.ResetBatchData(batchData)
+			batchData = p.processor.initBatchData()
 		case <-ctx.Done():
 			// 取消退出语义：
 			// - DrainOnCancel=false：不做最终 flush，返回 ErrContextIsClosed（可用 errors.Is(err, ErrContextIsClosed) 判断）
@@ -202,7 +207,7 @@ func (p *PipelineImpl[T]) performLoop(
 						if p.processor.isBatchFull(batchData) {
 							// 批满则立即同步 flush，以免超过 grace 时间
 							p.doFlush(drainCtx, false, batchData)
-							batchData = p.processor.ResetBatchData(batchData)
+							batchData = p.processor.initBatchData()
 						}
 					default:
 						// 通道当前没有更多缓冲项（非阻塞抽干结束）

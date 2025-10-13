@@ -96,14 +96,3 @@ func (p *StandardPipeline[T]) isBatchFull(batchData any) bool {
 func (p *StandardPipeline[T]) isBatchEmpty(batchData any) bool {
 	return len(batchData.([]T)) < 1
 }
-
-// ResetBatchData 在 flush 成功后重置批容器以便复用（减少分配/GC）
-func (p *StandardPipeline[T]) ResetBatchData(batchData any) any {
-	b := batchData.([]T)
-	// 若当前容量不足以满足期望的 FlushSize，则按 FlushSize 重新分配
-	if cap(b) < int(p.config.FlushSize) {
-		return make([]T, 0, int(p.config.FlushSize))
-	}
-	// 直接重切零长复用已有底层数组
-	return b[:0]
-}

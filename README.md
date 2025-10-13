@@ -1517,6 +1517,13 @@ Recommended metrics:
 - batch_size_observed_p50/p95/p99: distribution of actual batch sizes processed
 - flush_latency_p50/p95/p99: distribution of flush handler latency
 
+Q: Why use initBatchData instead of ResetBatchData when AsyncPerform is enabled?
+A: In async mode, each flush runs in a separate goroutine. If you reuse the same underlying buffer and call ResetBatchData (e.g., slice[:0]) while a previous flush goroutine still holds a reference to that buffer, you risk data corruption or loss due to shared backing storage.
+- AsyncPerform (concurrent flush): detach the current batch container and hand it to the flush goroutine, then create a new container for subsequent accumulation (initBatchData or from a pool). This guarantees no overlap on the same backing array/map.
+- SyncPerform (serial flush): it is safe to reuse the same container by ResetBatchData because flush completes in the same goroutine.
+- Recommended practice: for async, prefer “steal and replace” — old container escapes to the flush goroutine; new container starts accumulating immediately. Optionally use a sync.Pool to amortize allocations.
+- Dedup mode: the same rule applies to map-based batches — do not clear the map that a flush goroutine is still reading; hand over the map and create a fresh one.
+
 ### Q: How to choose appropriate configuration parameters?
 
 **A:** Configuration recommendations based on performance tests:
