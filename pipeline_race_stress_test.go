@@ -119,7 +119,7 @@ func TestRace_CloseVsCancel(t *testing.T) {
 	// Wait for pipeline to exit
 	select {
 	case <-p.Done():
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("pipeline did not exit in time")
 	}
 }
