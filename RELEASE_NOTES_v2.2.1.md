@@ -1,8 +1,8 @@
 Title
-v2.2.0
+v2.2.1
 
 Tag
-v2.2.0
+v2.2.1
 
 Target
 main
