@@ -434,6 +434,88 @@ pipeline = gopipeline.NewStandardPipeline(config, flushFunc)
 - `WithMaxConcurrentFlushes(n uint32)` - 限制异步 flush 并发（0 表示不限制）
 - `ValidateOrDefault()` - 校验并回退到安全默认（构造函数内部也会应用）
 
+### 🧩 日志与指标钩子（Logger and Metrics hooks）
+
+Prometheus MetricsHook（示例）
+```go
+// go get github.com/prometheus/client_golang/prometheus
+// 参见 examples/metrics_prometheus_example.go 获取完整实现
+m := NewPromMetrics(nil) // 注册到默认 registry
+p := gopipeline.NewDefaultStandardPipeline(func(ctx context.Context, batch []Item) error {
+    // 你的 flush 逻辑
+    return nil
+})
+p.WithMetrics(m)
+
+// 暴露 Prometheus 指标
+http.Handle("/metrics", promhttp.Handler())
+_ = http.ListenAndServe(":2112", nil)
+```
+
+Grafana 面板建议（快速起步）：
+- 速率计数（Rate）：
+  - gopipeline_flush_success_total / gopipeline_flush_failure_total
+  - gopipeline_error_count_total
+  - gopipeline_dropped_error_estimate_total
+  - gopipeline_final_flush_timeout_total
+  - gopipeline_drain_flush_total、gopipeline_drain_flush_timeout_total
+- 直方图/热力：
+  - gopipeline_flush_latency_seconds（按 result 标签：ok/fail）
+  - gopipeline_batch_size_observed
+- 饱和度：
+  - 错误通道饱和度比值（在你的采样协程中观测 len(errs)/cap(errs) 并导出为 gauge）
+- 告警建议：
+  - dropped_error_estimate_total 增速过高
+  - flush_failure_total 持续 > 0 且 flush_latency_seconds p95 上升
+  - final_flush_timeout_total 在发布/下线阶段出现尖峰
+
+WithLogger
+- 注入自定义 logger：
+```go
+buf := new(bytes.Buffer)
+logger := log.New(buf, "pipeline ", log.LstdFlags)
+
+p := gopipeline.NewDefaultStandardPipeline(func(ctx context.Context, batch []Item) error {
+    return flush(ctx, batch)
+})
+p.WithLogger(logger) // 避免在热路径频繁格式化字符串
+```
+- 建议：避免在热路径中做重格式化或大对象分配；可预先格式化，或使用分级日志降低开销。
+
+WithMetrics
+- 接口形态（管道在关键点调用）：
+```go
+type MetricsHook interface {
+    Flush(items int, duration time.Duration) // 每次 flush 完成后调用（无论成功/失败）
+    Error(err error)                         // 当 flush 返回错误时调用（非阻塞）
+    ErrorDropped()                           // 当错误通道饱和导致错误被丢弃时调用
+}
+```
+- 语义：
+  - Flush：每次 flush 调用一次；可记录批大小与耗时（直方图）
+  - Error：当 flush 失败时调用；计数并打标签
+  - ErrorDropped：当错误通道饱和且错误被丢弃时调用；用于估算丢弃规模
+- 示例（计数/直方图）：
+```go
+type hook struct {
+    flushOK   atomic.Int64
+    flushFail atomic.Int64
+}
+
+func (h *hook) Flush(items int, d time.Duration) { /* 导出批大小与耗时直方图 */ }
+func (h *hook) Error(err error)                  { h.flushFail.Add(1) /* 导出 error_count */ }
+func (h *hook) ErrorDropped()                    { /* 导出 dropped_error_estimate++ */ }
+
+// ...
+p.WithMetrics(&hook{})
+```
+- 与“推荐指标”字段对齐：
+  - error_count、dropped_error_estimate
+  - flush_success / flush_failure
+  - final_flush_timeout_count、drain_flush_count / drain_flush_timeout_count
+  - error_chan_saturation_ratio
+  - batch_size_observed_p50/p95/p99、flush_latency_p50/p95/p99
+
 ## 便捷 API：Start 与 Run
 
 这些辅助方法用于减少样板代码，封装了 AsyncPerform/SyncPerform、Done 与 ErrorChan 的常见用法。
@@ -498,6 +580,7 @@ if err := pipeline.Run(ctx, 128); err != nil {
 
 注意
 - Start 场景下，若误触发并发第二次启动，该错误会以 ErrAlreadyRunning 的形式出现在 errs。
+- Done 语义：每次 Perform 运行都会替换内部 done 通道；并发多次启动的语义不保证。建议使用 Start 返回的 done 来等待本次运行结束。
 - 你也可以不消费 errs；当缓冲区填满时，新错误将被丢弃（非阻塞、不会 panic）。
 - DataChan() 遵循“谁写谁关闭”。当希望无损收尾并优雅退出时，关闭该通道。
 - 若需在同一实例上多次运行，请勿在两次运行间关闭数据通道；使用 context 控制生命周期。
@@ -529,6 +612,37 @@ if !errors.Is(got, gopipeline.ErrAlreadyRunning) {
 cancel()
 <-done
 ```
+
+### Done 通道语义
+
+- 定义：一次运行级别的完成信号。每次执行（Sync/Async/Start/Run）都会创建或替换内部的 done；当执行循环完全退出后关闭（通道关闭路径会做最终 flush；取消路径在启用 DrainOnCancel 时做限时收尾）。
+- 首选 Start 返回的 done：调用 Start(ctx) 时，使用返回的 done 来等待/选择本次运行结束，它与本次运行绑定且稳定。
+- 关于 p.Done()：
+  - 仅在已启动运行之后、需要在其它位置获取“当前运行”的完成信号时使用。
+  - 不要在 Start 之前缓存 p.Done() 再去等待（可能是 nil 或陈旧/已关闭的通道）。
+  - 不要在“并发二次启动”的场景指望 p.Done() 具有稳定语义；二次启动会通过 errs 暴露 ErrAlreadyRunning。
+- 禁止手动关闭：done 通道由管道内部负责关闭。
+- 同步路径通常不需要：SyncPerform/Run 本身会阻塞到结束，通常无需 done 通道。
+
+示例：
+
+正确：优先使用 Start 返回的 done
+```go
+done, errs := p.Start(ctx)
+// ... 在独立 goroutine 中消费 errs ...
+<-done // 等待本次运行结束
+```
+
+反例：在 Start 前缓存 p.Done()
+```go
+d := p.Done()   // 可能为 nil 或陈旧
+_ = d
+done, _ := p.Start(ctx)
+<-done          // 更推荐使用与本次运行绑定的 done
+```
+
+时序说明：
+- done 在执行循环退出后关闭。通道关闭路径会同步 flush 剩余数据（可受 FinalFlushOnCloseTimeout 保护）；取消路径下若启用 DrainOnCancel，会在限时窗口内做一次尽力收尾 flush 然后退出。
 
 ## 💡 使用示例
 
@@ -1435,6 +1549,16 @@ func(ctx context.Context, batchData []Task) error {
 ```
 
 ## 🔧 故障排除
+
+### 常见误配置自查清单
+- flush 函数不尊重 ctx：超时（FinalFlushOnCloseTimeout）与取消收尾窗口将被忽略；应在 <-ctx.Done() 后尽快返回。
+- 错误通道容量过小且未消费：容易导致大量丢弃；增大容量、在独立 goroutine 中消费，或依赖 MetricsHook.ErrorDropped 触发告警。
+- BufferSize 相对 FlushSize 过小：更多刷新走“超时路径”，吞吐下降且尾延迟上升。突发场景建议 BufferSize ≥ 4–10 × FlushSize。
+- 计划复用管道却提前关闭 DataChan：会导致无法复用；多次运行应使用 context 控制生命周期。
+- 并发二次启动同一实例：不支持；Start 通过 errs 暴露 ErrAlreadyRunning，Sync/Async 直接返回该错误。
+- flush 内部做了无界并行：削弱 MaxConcurrentFlushes 的上限控制；请限制内部并行度或尊重 ctx。
+- 热路径过度打日志：建议使用结构化/分级日志，避免逐项/逐次重格式化。
+- 直方图桶不合理：请依据延迟 SLO 选择合理的桶（如 1ms..10s 指数桶），否则热力图与 p95 无参考意义。
 
 ### 内存泄漏
 

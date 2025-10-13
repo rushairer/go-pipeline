@@ -117,17 +117,23 @@ func (p *PipelineImpl[T]) performLoop(
 	if !atomic.CompareAndSwapInt32(&p.running, 0, 1) {
 		return ErrAlreadyRunning
 	}
-	// 设置本次运行的 Done 通道
+	// 设置本次运行的 Done 通道（捕获本次专属通道）
 	p.runMu.Lock()
-	p.runDone = make(chan struct{})
+	myDone := p.runDone
+	if myDone == nil {
+		myDone = make(chan struct{})
+		p.runDone = myDone
+	}
 	p.runMu.Unlock()
 	defer func() {
 		// 运行结束：恢复运行状态并发出完成信号
 		atomic.StoreInt32(&p.running, 0)
 
 		p.runMu.Lock()
-		if p.runDone != nil {
-			close(p.runDone)
+		// 仅关闭本次运行捕获的通道，避免重复关闭历史通道
+		close(myDone)
+		if p.runDone == myDone {
+			p.runDone = nil
 		}
 		p.runMu.Unlock()
 	}()
@@ -381,27 +387,40 @@ func (p *PipelineImpl[T]) ErrorChan(size int) <-chan error {
 	return p.errorChan
 }
 
-// Start 启动异步执行，返回本次运行的完成信号和错误通道。
-// 注意：为了避免返回 nil 的 done，这里在启动后短暂自旋等待 runDone 就绪（最小侵入实现）。
+// Start 启动异步执行，返回本次运行的完成信号（done）和错误通道（errs）。
+// 行为与约定：
+//   - 若管道“已在运行”：直接复用并返回“当前正在运行”的 done，不新建/不覆盖；同时异步触发一次 AsyncPerform，
+//     仅用于将 ErrAlreadyRunning 上报到 errs（不会影响现有运行）。
+//   - 若管道“未在运行”：仅当 runDone 为空时创建新的 done，否则复用现有 done；随后启动 AsyncPerform。
+//   - 提示：保持测试覆盖，尤其是“并发二次启动（ErrAlreadyRunning）”与“Done 关闭时序”的断言，确保语义稳定。
 func (p *PipelineImpl[T]) Start(ctx context.Context) (<-chan struct{}, <-chan error) {
 	errs := p.ErrorChan(0)
 
-	// 异步启动，并将可能出现的错误（如 ErrAlreadyRunning）送入错误通道
+	p.runMu.Lock()
+	if atomic.LoadInt32(&p.running) == 1 && p.runDone != nil {
+		// 已在运行：复用当前 done
+		done := p.runDone
+		p.runMu.Unlock()
+		// 触发一次执行，仅用于将 ErrAlreadyRunning 上报告知调用方
+		go func() {
+			if err := p.AsyncPerform(ctx); err != nil {
+				p.safeErrorSend(err)
+			}
+		}()
+		return done, errs
+	}
+	// 未在运行：如无现有通道则创建；否则复用已有通道，避免并发覆盖
+	if p.runDone == nil {
+		p.runDone = make(chan struct{})
+	}
+	done := p.runDone
+	p.runMu.Unlock()
+
 	go func() {
 		if err := p.AsyncPerform(ctx); err != nil {
 			p.safeErrorSend(err)
 		}
 	}()
-
-	// 尝试等待 runDone 就绪，避免返回 nil
-	var done <-chan struct{}
-	for i := 0; i < 10; i++ {
-		if d := p.Done(); d != nil {
-			done = d
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
 	return done, errs
 }
 

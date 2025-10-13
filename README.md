@@ -420,6 +420,87 @@ Available configuration methods:
 - `WithMaxConcurrentFlushes(n uint32)` - Limit async flush concurrency (0 = unlimited)
 - `ValidateOrDefault()` - Validate fields and fill safe defaults (constructor also applies defaults)
 
+### Advanced: Logger and Metrics hooks
+
+Prometheus MetricsHook (example)
+```go
+// go get github.com/prometheus/client_golang/prometheus
+// See examples/metrics_prometheus_example.go for a full implementation.
+m := NewPromMetrics(nil) // registers to default registry
+p := gopipeline.NewDefaultStandardPipeline(func(ctx context.Context, batch []Item) error {
+    // your flush logic
+    return nil
+})
+p.WithMetrics(m)
+
+// Expose Prometheus metrics
+http.Handle("/metrics", promhttp.Handler())
+_ = http.ListenAndServe(":2112", nil)
+```
+
+Recommended Grafana panels (quick start):
+- Rate counters:
+  - gopipeline_flush_success_total / gopipeline_flush_failure_total
+  - gopipeline_error_count_total
+  - gopipeline_dropped_error_estimate_total
+  - gopipeline_final_flush_timeout_total
+  - gopipeline_drain_flush_total, gopipeline_drain_flush_timeout_total
+- Histograms/heatmaps:
+  - gopipeline_flush_latency_seconds (by result label: ok/fail)
+  - gopipeline_batch_size_observed
+- Saturation:
+  - error channel saturation ratio (sampled len(errs)/cap(errs) in your sampler; export as gauge)
+- Suggested alerts:
+  - High dropped_error_estimate_total rate
+  - Sustained flush_failure_total > 0 with elevated latency p95 on flush_latency_seconds
+  - final_flush_timeout_total spikes during deployments/shutdown
+
+WithLogger
+- Inject a custom logger:
+```go
+buf := new(bytes.Buffer)
+logger := log.New(buf, "pipeline ", log.LstdFlags)
+p := gopipeline.NewDefaultStandardPipeline(func(ctx context.Context, batch []Item) error {
+    return flush(ctx, batch)
+})
+p.WithLogger(logger) // avoid heavy formatting on the hot path
+```
+- Recommendation: avoid frequent string formatting or large allocations in the hot path; pre-format messages or use leveled logging if available.
+
+WithMetrics
+- Interface shape (called by the pipeline at key points):
+```go
+type MetricsHook interface {
+    Flush(items int, duration time.Duration) // called after a flush completes (success or failure)
+    Error(err error)                         // called when a flush returns error (non-blocking)
+    ErrorDropped()                           // called when an error cannot be enqueued (buffer full)
+}
+```
+- Semantics:
+  - Flush: invoked once per flush; record batch size and latency (e.g., histogram)
+  - Error: invoked when flush returns an error; count and tag error type
+  - ErrorDropped: invoked if the error channel is saturated and drops occur
+- Example (counters/histograms):
+```go
+type hook struct {
+    flushOK    atomic.Int64
+    flushFail  atomic.Int64
+}
+
+func (h *hook) Flush(items int, d time.Duration) { /* export batch size and latency */ }
+func (h *hook) Error(err error)                  { h.flushFail.Add(1) /* export error_count */ }
+func (h *hook) ErrorDropped()                    { /* export dropped_error_estimate++ */ }
+
+// ...
+p.WithMetrics(&hook{})
+```
+- Align with “Recommended metrics”:
+  - error_count, dropped_error_estimate
+  - flush_success / flush_failure
+  - final_flush_timeout_count, drain_flush_count / drain_flush_timeout_count
+  - error_chan_saturation_ratio
+  - batch_size_observed_p50/p95/p99, flush_latency_p50/p95/p99
+
 ## Convenience APIs: Start and Run
 
 These helper methods reduce boilerplate by wrapping AsyncPerform/SyncPerform, Done and ErrorChan handling.
@@ -484,6 +565,7 @@ if err := pipeline.Run(ctx, 128); err != nil {
 
 Notes
 - Start may deliver a second concurrent start attempt as ErrAlreadyRunning via errs.
+- Done semantics: each Perform run replaces the internal done channel. Concurrent multi-start semantics are not guaranteed; prefer using the done returned by Start for the current run.
 - You may choose not to consume errs; if the buffer fills, new errors are dropped (non-blocking, no panic).
 - DataChan() follows "writer closes". Close it when you want a lossless final flush and graceful exit.
 - For multiple runs on the same instance, do NOT close the data channel between runs; control lifecycle with context.
@@ -515,6 +597,37 @@ if !errors.Is(got, gopipeline.ErrAlreadyRunning) {
 cancel()
 <-done
 ```
+
+### Done channel semantics
+
+- What it is: a per-run completion signal. Each Perform run (Sync/Async/Start/Run) creates/replaces the internal done; it closes when the perform loop fully exits, after any final flush (channel-close path) or cancel-drain (if enabled).
+- Prefer Start’s returned done: when you call Start(ctx), use the returned done to wait/select for that specific run. It is stable and bound to that run.
+- Using p.Done():
+  - Use it only after you have started a run, when you need to query the current run’s done from elsewhere.
+  - Do not cache p.Done() before Start and wait on it later (it may be nil or a stale/closed one).
+  - Do not rely on p.Done() across concurrent starts; if a second start is attempted, semantics are not guaranteed. The second attempt surfaces ErrAlreadyRunning via errs.
+- Do not close it yourself: the pipeline owns and closes the done channel.
+- Not needed for sync paths: SyncPerform/Run block until completion; you typically do not need a done channel.
+
+Examples:
+
+Correct: prefer Start’s returned done
+```go
+done, errs := p.Start(ctx)
+// ... consume errs in a goroutine ...
+<-done // wait for this run to finish
+```
+
+Anti-pattern: caching p.Done() before Start
+```go
+d := p.Done()   // may be nil or stale
+_ = d
+done, _ := p.Start(ctx)
+<-done          // prefer using this run-scoped done
+```
+
+Timing:
+- The done channel closes after the perform loop ends. On channel-close path, any remaining items are flushed synchronously (optionally under FinalFlushOnCloseTimeout). On cancel path, if DrainOnCancel is true, a bounded best-effort drain flush is performed before exit.
 
 ## Migration to Start/Run
 
@@ -1470,6 +1583,16 @@ func(ctx context.Context, batchData []Task) error {
 ```
 
 ## 🔧 Troubleshooting
+
+### Common Misconfiguration Checklist
+- Flush function does not respect ctx: timeouts (FinalFlushOnCloseTimeout) and drain windows are ignored; fix by early return on <-ctx.Done().
+- Error channel not consumed with too-small capacity: may cause frequent drops; either increase capacity, consume in a dedicated goroutine, and/or rely on MetricsHook.ErrorDropped for alerts.
+- BufferSize too small relative to FlushSize: shifts many flushes to timeout path; lower throughput and higher tail latency. Aim BufferSize ≥ 4–10 × FlushSize under bursts.
+- Closing DataChan while planning to reuse pipeline: breaks reuse; use context cancellation for multi-run lifecycle.
+- Starting the same pipeline concurrently: not supported; ErrAlreadyRunning is emitted via errs in Start or returned by Sync/Async.
+- Flush ignores MaxConcurrentFlushes effect by doing extra internal fan-out: avoid spawning unbounded goroutines inside your flush; bound your own parallelism or respect ctx.
+- Over-logging in hot path: prefer structured/leveled logs and avoid heavy formatting per item/flush.
+- Histograms without sane buckets: pick buckets that reflect your latency SLOs (e.g., 1ms..10s exponentially); otherwise heatmaps/p95 are meaningless.
 
 ### Memory Leaks
 
