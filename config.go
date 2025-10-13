@@ -18,8 +18,6 @@ type PipelineConfig struct {
 	DrainGracePeriod time.Duration
 	// MaxConcurrentFlushes 限制异步 flush 的最大并发数（0 表示不限制）
 	MaxConcurrentFlushes uint32
-	// UseMapReuse 启用去重批次 map 复用（true：flush 后清空复用；false：flush 后新建）
-	UseMapReuse bool
 	// FinalFlushOnCloseTimeout 关闭数据通道路径的“最终 flush”超时（0 表示不限时，使用 Background）
 	FinalFlushOnCloseTimeout time.Duration
 }
@@ -56,7 +54,6 @@ func NewPipelineConfig() PipelineConfig {
 		DrainOnCancel:            defaultDrainOnCancel,
 		DrainGracePeriod:         defaultDrainGracePeriod,
 		MaxConcurrentFlushes:     0,
-		UseMapReuse:              false,
 		FinalFlushOnCloseTimeout: 0,
 	}
 }
@@ -94,12 +91,6 @@ func (c PipelineConfig) WithDrainGracePeriod(d time.Duration) PipelineConfig {
 // WithMaxConcurrentFlushes 设置异步 flush 的最大并发数（0 表示不限制）
 func (c PipelineConfig) WithMaxConcurrentFlushes(n uint32) PipelineConfig {
 	c.MaxConcurrentFlushes = n
-	return c
-}
-
-// WithUseMapReuse 启用/关闭去重批次 map 复用
-func (c PipelineConfig) WithUseMapReuse(enabled bool) PipelineConfig {
-	c.UseMapReuse = enabled
 	return c
 }
 

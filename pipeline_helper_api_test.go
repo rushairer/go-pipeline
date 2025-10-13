@@ -25,7 +25,6 @@ func quickConfig() PipelineConfig {
 		DrainOnCancel:            true,
 		DrainGracePeriod:         50 * time.Millisecond,
 		MaxConcurrentFlushes:     0,
-		UseMapReuse:              false,
 		FinalFlushOnCloseTimeout: 50 * time.Millisecond,
 	}.ValidateOrDefault()
 }
