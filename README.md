@@ -35,18 +35,33 @@ go get github.com/rushairer/go-pipeline/v2@latest
 ## 📁 Project Structure
 
 ```
-v2/
-├── config.go                           # Configuration definitions
-├── errors.go                           # Error definitions
-├── interface.go                        # Interface definitions
-├── pipeline_impl.go                    # Common pipeline implementation
-├── pipeline_standard.go                # Standard pipeline implementation
-├── pipeline_deduplication.go           # Deduplication pipeline implementation
-├── pipeline_standard_test.go           # Standard pipeline unit tests
-├── pipeline_standard_benchmark_test.go # Standard pipeline benchmark tests
-├── pipeline_deduplication_test.go      # Deduplication pipeline unit tests
-├── pipeline_deduplication_benchmark_test.go # Deduplication pipeline benchmark tests
-└── pipeline_performance_benchmark_test.go # Performance benchmark tests
+.
+├── config.go
+├── errors.go
+├── interface.go
+├── pipeline_impl.go
+├── pipeline_standard.go
+├── pipeline_deduplication.go
+├── pipeline_standard_test.go
+├── pipeline_standard_benchmark_test.go
+├── pipeline_deduplication_test.go
+├── pipeline_deduplication_benchmark_test.go
+├── pipeline_cancel_drain_test.go
+├── pipeline_concurrency_test.go
+├── pipeline_error_chan_test.go
+├── pipeline_error_handling_test.go
+├── pipeline_helper_api_test.go
+├── pipeline_performance_benchmark_test.go
+├── README.md
+├── README_cn.md
+├── RELEASE_NOTES_v2.2.0-beta.md
+├── go.mod
+├── go.sum
+├── LICENSE
+├── Makefile
+├── .github/
+├── .vscode/
+└── .codebuddy/
 ```
 
 ## 📦 Core Components
@@ -106,6 +121,10 @@ graph TD
     K --> E
 ```
 
+Notes:
+- On channel-close path, a final synchronous flush is performed; if `FinalFlushOnCloseTimeout > 0`, it runs under a context with timeout. Your flush function must respect the provided context to exit timely.
+- If configured, async flush concurrency is limited by `MaxConcurrentFlushes` (0 = unlimited).
+
 ### Test File Descriptions
 
 The project includes a complete test suite to ensure code quality and performance:
@@ -142,11 +161,13 @@ graph TD
 
 ```go
 type PipelineConfig struct {
-    BufferSize       uint32        // Buffer channel capacity (default: 100)
-    FlushSize        uint32        // Maximum batch data capacity (default: 50)
-    FlushInterval    time.Duration // Timed flush interval (default: 50ms)
-    DrainOnCancel    bool          // Whether to best-effort flush on cancellation (default false)
-    DrainGracePeriod time.Duration // Max window for the final flush when DrainOnCancel is true
+    BufferSize                uint32        // Buffer channel capacity (default: 100)
+    FlushSize                 uint32        // Maximum batch data capacity (default: 50)
+    FlushInterval             time.Duration // Timed flush interval (default: 50ms)
+    DrainOnCancel             bool          // Whether to best-effort flush on cancellation (default false)
+    DrainGracePeriod          time.Duration // Max window for the final flush when DrainOnCancel is true
+    FinalFlushOnCloseTimeout  time.Duration // Max window for the final flush on channel-close path (0 = disabled; use context.Background)
+    MaxConcurrentFlushes      uint32        // Max concurrent async flushes (0 = unlimited)
 }
 ```
 
@@ -395,6 +416,8 @@ Available configuration methods:
 - `WithFlushInterval(interval time.Duration)` - Set flush interval
 - `WithDrainOnCancel(enabled bool)` - Enable best-effort final flush on cancel
 - `WithDrainGracePeriod(d time.Duration)` - Set max window for the final flush when DrainOnCancel is enabled
+- `WithFinalFlushOnCloseTimeout(d time.Duration)` - Set timeout for the final flush on channel-close path (0 = disabled)
+- `WithMaxConcurrentFlushes(n uint32)` - Limit async flush concurrency (0 = unlimited)
 - `ValidateOrDefault()` - Validate fields and fill safe defaults (constructor also applies defaults)
 
 ## Convenience APIs: Start and Run
@@ -464,6 +487,34 @@ Notes
 - You may choose not to consume errs; if the buffer fills, new errors are dropped (non-blocking, no panic).
 - DataChan() follows "writer closes". Close it when you want a lossless final flush and graceful exit.
 - For multiple runs on the same instance, do NOT close the data channel between runs; control lifecycle with context.
+
+### Concurrent second start assertion (ErrAlreadyRunning)
+```go
+// Attempt to start the same instance twice; the second should surface ErrAlreadyRunning via errs.
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+done, errs := pipeline.Start(ctx)
+
+// second start
+_, errs2 := pipeline.Start(ctx)
+
+// collect one error from either errs or errs2
+var got error
+select {
+case got = <-errs:
+case got = <-errs2:
+case <-time.After(200 * time.Millisecond):
+    log.Fatalf("expected ErrAlreadyRunning, but timed out")
+}
+
+if !errors.Is(got, gopipeline.ErrAlreadyRunning) {
+    log.Fatalf("want ErrAlreadyRunning, got %v", got)
+}
+
+cancel()
+<-done
+```
 
 ## Migration to Start/Run
 
@@ -1309,6 +1360,49 @@ A: Concurrent starts are not allowed. The second attempt will fail with ErrAlrea
 Q: How is the ErrorChan buffer size determined?
 A: The first call to ErrorChan(size) decides the buffer size; later calls ignore size. Best practice: call ErrorChan with your desired size before starting the run. If you never call it, a default size is created on first internal send. If nobody consumes and the buffer fills, subsequent errors are dropped (non-blocking, no panic).
 
+
+Q: How can I observe dropped errors or add instrumentation?
+A: Since errors are sent non-blockingly and may be dropped when the buffer is full and unconsumed, consider:
+- Metrics on consumption: count processed errors and export as a counter.
+- Saturation sampling: if you control the channel capacity (ErrorChan(n)), you can periodically sample len(errs) and cap(errs); frequent len(errs) == cap suggests saturation and potential drops.
+- Producer-side metrics: also count how many errors your batch function returns; compare to consumed count to estimate drops.
+- Increase buffer if needed and/or consume errors in a dedicated goroutine to reduce pressure.
+
+Example (basic metrics):
+```go
+errs := pipeline.ErrorChan(128) // known capacity
+var processed atomic.Int64
+go func() {
+    t := time.NewTicker(time.Second)
+    defer t.Stop()
+    for {
+        select {
+        case err, ok := <-errs:
+            if !ok { return }
+            processed.Add(1)
+            // export err type, batch size, etc.
+            _ = err
+        case <-t.C:
+            // sample saturation; high ratio may imply drops under burst
+            _ = len(errs) // sample only where you hold the chan variable
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+```
+
+Recommended metrics:
+- error_count: total processed errors read from errs
+- dropped_error_estimate: producer_error_count - error_count (if available), or estimate via sustained saturation
+- flush_success: count of successful flushes
+- flush_failure: count of failed flushes
+- final_flush_timeout_count: number of timeouts during final flush on channel-close path
+- drain_flush_count: number of best-effort drain flushes on cancel
+- drain_flush_timeout_count: number of drain flushes that timed out
+- error_chan_saturation_ratio: sampled len(errs)/cap(errs) over time
+- batch_size_observed_p50/p95/p99: distribution of actual batch sizes processed
+- flush_latency_p50/p95/p99: distribution of flush handler latency
 
 ### Q: How to choose appropriate configuration parameters?
 

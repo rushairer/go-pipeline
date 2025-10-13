@@ -35,18 +35,33 @@ go get github.com/rushairer/go-pipeline/v2@latest
 ## 📁 项目结构
 
 ```
-v2/
-├── config.go                           # 配置定义
-├── errors.go                           # 错误定义
-├── interface.go                        # 接口定义
-├── pipeline_impl.go                    # 通用管道实现
-├── pipeline_standard.go                # 标准管道实现
-├── pipeline_deduplication.go           # 去重管道实现
-├── pipeline_standard_test.go           # 标准管道单元测试
-├── pipeline_standard_benchmark_test.go # 标准管道基准测试
-├── pipeline_deduplication_test.go      # 去重管道单元测试
-├── pipeline_deduplication_benchmark_test.go # 去重管道基准测试
-└── pipeline_performance_benchmark_test.go # 性能基准测试
+.
+├── config.go
+├── errors.go
+├── interface.go
+├── pipeline_impl.go
+├── pipeline_standard.go
+├── pipeline_deduplication.go
+├── pipeline_standard_test.go
+├── pipeline_standard_benchmark_test.go
+├── pipeline_deduplication_test.go
+├── pipeline_deduplication_benchmark_test.go
+├── pipeline_cancel_drain_test.go
+├── pipeline_concurrency_test.go
+├── pipeline_error_chan_test.go
+├── pipeline_error_handling_test.go
+├── pipeline_helper_api_test.go
+├── pipeline_performance_benchmark_test.go
+├── README.md
+├── README_cn.md
+├── RELEASE_NOTES_v2.2.0-beta.md
+├── go.mod
+├── go.sum
+├── LICENSE
+├── Makefile
+├── .github/
+├── .vscode/
+└── .codebuddy/
 ```
 
 ## 📦 核心组件
@@ -106,6 +121,10 @@ graph TD
     K --> E
 ```
 
+说明（Notes）:
+- 在“通道关闭”路径下会进行一次最终同步 flush；若 `FinalFlushOnCloseTimeout > 0`，该 flush 会在带超时的上下文下执行。你的 flush 函数必须尊重传入的 ctx，确保能按时退出。
+- 若配置了并发上限，异步 flush 的并发度受 `MaxConcurrentFlushes` 限制（0 表示不限制）。
+
 ### 测试文件说明
 
 项目包含完整的测试套件，确保代码质量和性能：
@@ -142,12 +161,13 @@ graph TD
 
 ```go
 type PipelineConfig struct {
-    BufferSize           uint32        // 缓冲通道的容量 (默认: 100)
-    FlushSize            uint32        // 批处理数据的最大容量 (默认: 50)
-    FlushInterval        time.Duration // 定时刷新的时间间隔 (默认: 50ms)
-    DrainOnCancel        bool          // 取消时是否进行限时收尾刷新（默认 false：不 flush）
-    DrainGracePeriod     time.Duration // 收尾刷新最长时间窗口（启用 DrainOnCancel 时生效）
-    MaxConcurrentFlushes uint32        // 异步 flush 的最大并发数（0 表示不限制）
+    BufferSize               uint32        // 缓冲通道的容量 (默认: 100)
+    FlushSize                uint32        // 批处理数据的最大容量 (默认: 50)
+    FlushInterval            time.Duration // 定时刷新的时间间隔 (默认: 50ms)
+    DrainOnCancel            bool          // 取消时是否进行限时收尾刷新（默认 false：不 flush）
+    DrainGracePeriod         time.Duration // 收尾刷新最长时间窗口（启用 DrainOnCancel 时生效）
+    FinalFlushOnCloseTimeout time.Duration // 通道关闭路径的最终 flush 超时（0 表示禁用，使用 context.Background）
+    MaxConcurrentFlushes     uint32        // 异步 flush 的最大并发数（0 表示不限制）
 }
 ```
 
@@ -410,6 +430,7 @@ pipeline = gopipeline.NewStandardPipeline(config, flushFunc)
 - `WithFlushInterval(interval time.Duration)` - 设置刷新间隔
 - `WithDrainOnCancel(enabled bool)` - 启用取消时的限时收尾
 - `WithDrainGracePeriod(d time.Duration)` - 设置收尾刷新最长时间窗口
+- `WithFinalFlushOnCloseTimeout(d time.Duration)` - 设置通道关闭路径的最终 flush 超时（0 表示禁用）
 - `WithMaxConcurrentFlushes(n uint32)` - 限制异步 flush 并发（0 表示不限制）
 - `ValidateOrDefault()` - 校验并回退到安全默认（构造函数内部也会应用）
 
@@ -480,6 +501,34 @@ if err := pipeline.Run(ctx, 128); err != nil {
 - 你也可以不消费 errs；当缓冲区填满时，新错误将被丢弃（非阻塞、不会 panic）。
 - DataChan() 遵循“谁写谁关闭”。当希望无损收尾并优雅退出时，关闭该通道。
 - 若需在同一实例上多次运行，请勿在两次运行间关闭数据通道；使用 context 控制生命周期。
+
+### 并发二次启动断言（ErrAlreadyRunning）
+```go
+// 尝试对同一实例并发二次启动；第二次应通过 errs 通道暴露 ErrAlreadyRunning。
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+done, errs := pipeline.Start(ctx)
+
+// 第二次启动
+_, errs2 := pipeline.Start(ctx)
+
+// 从任一错误通道收集一次错误
+var got error
+select {
+case got = <-errs:
+case got = <-errs2:
+case <-time.After(200 * time.Millisecond):
+    log.Fatalf("期望 ErrAlreadyRunning，但发生超时")
+}
+
+if !errors.Is(got, gopipeline.ErrAlreadyRunning) {
+    log.Fatalf("希望 ErrAlreadyRunning，实际: %v", got)
+}
+
+cancel()
+<-done
+```
 
 ## 💡 使用示例
 
@@ -1276,6 +1325,49 @@ BenchmarkPipelineBatchSizes/BatchSize500-10       500     198.6 ns/op    500.0 i
 
 ### Q: 错误通道（ErrorChan）的缓冲大小如何决定？
 **A:** `ErrorChan(size)` 采用“首次调用决定容量”策略：第一次调用决定缓冲大小，后续调用的 size 将被忽略。最佳实践是在启动运行前先调用 `ErrorChan(期望容量)`。如果从未显式调用，框架会在首次内部发送错误时按默认容量初始化；若无人消费且缓冲区填满，后续错误将被丢弃（非阻塞、不 panic）。
+
+### Q: 如何观测被丢弃的错误或做打点？
+**A:** 由于错误以非阻塞方式发送，且当缓冲区已满且无人消费时后续错误会被丢弃，建议：
+- 消费端打点：统计已消费错误数，按类型聚合并导出指标。
+- 饱和度采样：若你能够持有错误通道变量（errs := ErrorChan(n)），可周期性采样 len(errs) 与容量；频繁出现 len(errs) == cap(errs) 说明通道饱和、可能发生丢弃。
+- 生产端计数：你的批处理函数返回了多少错误（或失败批次），与消费端计数对比，可粗略估算丢弃规模。
+- 降低丢弃：增大错误通道容量、或在独立 goroutine 中持续消费错误。
+
+示例（基础指标）：
+```go
+errs := pipeline.ErrorChan(128) // 已知容量
+var processed atomic.Int64
+go func() {
+    t := time.NewTicker(time.Second)
+    defer t.Stop()
+    for {
+        select {
+        case err, ok := <-errs:
+            if !ok { return }
+            processed.Add(1)
+            // 在此打点错误类型、批大小、耗时等维度
+            _ = err
+        case <-t.C:
+            // 采样饱和度（需要持有 errs 变量）
+            _ = len(errs)
+        case <-ctx.Done():
+            return
+        }
+    }
+}()
+```
+
+推荐指标（Recommended metrics）：
+- error_count：从 errs 通道成功消费到的错误总数
+- dropped_error_estimate：生产端错误数（或失败批次数）减去消费端 error_count 的差值（若可观测）；或通过持续饱和的采样做估算
+- flush_success：flush 成功次数
+- flush_failure：flush 失败次数
+- final_flush_timeout_count：通道关闭路径的最终 flush 发生超时的次数
+- drain_flush_count：取消（cancel）时执行的“尽力收尾”flush 次数
+- drain_flush_timeout_count：取消收尾时 flush 超时的次数
+- error_chan_saturation_ratio：周期性采样 len(errs)/cap(errs) 的饱和度比值
+- batch_size_observed_p50/p95/p99：实际处理批次大小的分布
+- flush_latency_p50/p95/p99：flush 处理耗时的分布
 
 ### Q: 如何选择合适的配置参数？
 
