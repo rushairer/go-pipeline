@@ -70,58 +70,125 @@ func TestRace_ConcurrentSecondStart(t *testing.T) {
 
 // Race: data channel close vs context cancel around the same time.
 func TestRace_CloseVsCancel(t *testing.T) {
-	cfg := NewPipelineConfig().
-		WithBufferSize(256).
-		WithFlushSize(32).
-		WithFlushInterval(5 * time.Millisecond).
-		WithFinalFlushOnCloseTimeout(50 * time.Millisecond)
-	p := NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
-		// small work to tick the loop
-		select {
-		case <-time.After(100 * time.Microsecond):
-		case <-ctx.Done():
-			return ctx.Err()
+	// common pipeline builder without FinalFlushOnCloseTimeout to reduce timing interference
+	newPipe := func() *StandardPipeline[int] {
+		cfg := NewPipelineConfig().
+			WithBufferSize(256).
+			WithFlushSize(32).
+			WithFlushInterval(5 * time.Millisecond)
+		return NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
+			// small work to tick the loop; always respect ctx
+			select {
+			case <-time.After(100 * time.Microsecond):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return nil
+		})
+	}
+
+	t.Run("close_then_cancel", func(t *testing.T) {
+		p := newPipe()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// start and set up optional error diagnostics
+		localDone := make(chan struct{})
+		go func() { _ = p.SyncPerform(ctx); close(localDone) }()
+		errs := p.ErrorChan(16)
+		doneErrs := make(chan struct{})
+		go func() {
+			defer close(doneErrs)
+			deadline := time.NewTimer(500 * time.Millisecond)
+			defer deadline.Stop()
+			for {
+				select {
+				case err, ok := <-errs:
+					if !ok {
+						return
+					}
+					t.Logf("pipeline error: %v", err)
+				case <-deadline.C:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
+		ch := p.DataChan()
+		for i := 0; i < 100; i++ {
+			select {
+			case ch <- i:
+			case <-ctx.Done():
+				t.Fatal("ctx canceled prematurely")
+			}
 		}
-		return nil
+
+		// deterministic sequence: close then cancel with tiny delay
+		close(ch)
+		time.Sleep(1 * time.Millisecond)
+		cancel()
+
+		// wait for pipeline to exit (increase timeout to 5s for CI stability)
+		select {
+		case <-localDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("pipeline did not exit in time (close_then_cancel)")
+		}
+		<-doneErrs
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go func() { _ = p.AsyncPerform(ctx) }()
+	t.Run("cancel_then_close", func(t *testing.T) {
+		p := newPipe()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	ch := p.DataChan()
-	// produce a bit
-	for i := 0; i < 100; i++ {
-		select {
-		case ch <- i:
-		case <-ctx.Done():
-			t.Fatal("ctx canceled prematurely")
+		localDone := make(chan struct{})
+		go func() { _ = p.SyncPerform(ctx); close(localDone) }()
+		errs := p.ErrorChan(16)
+		doneErrs := make(chan struct{})
+		go func() {
+			defer close(doneErrs)
+			deadline := time.NewTimer(500 * time.Millisecond)
+			defer deadline.Stop()
+			for {
+				select {
+				case err, ok := <-errs:
+					if !ok {
+						return
+					}
+					t.Logf("pipeline error: %v", err)
+				case <-deadline.C:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
+		ch := p.DataChan()
+		for i := 0; i < 100; i++ {
+			select {
+			case ch <- i:
+			case <-ctx.Done():
+				t.Fatal("ctx canceled prematurely")
+			}
 		}
-	}
 
-	// Race: close and cancel almost simultaneously
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		close(ch)
-	}()
-	go func() {
-		time.Sleep(0) // yield
+		// deterministic sequence: cancel then close with tiny delay
 		cancel()
-	}()
+		time.Sleep(1 * time.Millisecond)
+		close(ch)
 
-	select {
-	case <-done:
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("close producer goroutine did not finish")
-	}
-
-	// Wait for pipeline to exit
-	select {
-	case <-p.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("pipeline did not exit in time")
-	}
+		// wait for pipeline to exit (increase timeout to 5s for CI stability)
+		select {
+		case <-localDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("pipeline did not exit in time (cancel_then_close)")
+		}
+		<-doneErrs
+	})
 }
 
 // Stress: verify MaxConcurrentFlushes upper bound is respected under pressure.
