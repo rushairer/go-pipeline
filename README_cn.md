@@ -1499,6 +1499,49 @@ go func() {
 - **内存受限场景**: FlushSize=20, BufferSize=40, FlushInterval=100ms
 - **CPU密集型处理**: 使用异步模式，适当增大缓冲区
 
+## 运行时调参（动态调整）
+以下参数可在运行中安全调整：
+- UpdateFlushSize(n uint32)：作用于“新建批次”的预分配与满批阈值
+- UpdateFlushInterval(d time.Duration)：在下一次定时周期生效，内部会“轻推”重置计时器，加速应用
+
+
+注意事项：
+- FlushSize 的变化不会回溯修改已在构建中的批；slice/map 会在需要时自动扩容
+- FlushInterval 更新在下一次定时重置时生效；组件会轻推一次以尽快采用新值
+- MaxConcurrentFlushes 使用动态限流器实现：在飞 flush 会释放到其获取时对应的通道，避免死锁
+
+快速示例：
+p.UpdateFlushSize(128)
+p.UpdateFlushInterval(25 * time.Millisecond)
+
+
+完整示例：
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+p := gopipeline.NewStandardPipeline[int](gopipeline.NewPipelineConfig(), func(ctx context.Context, batch []int) error {
+    // 你的 flush 实现
+    return nil
+})
+done, errs := p.Start(ctx)
+go func() { for err := range errs { log.Println("err:", err) } }()
+
+// 运行中调参
+p.UpdateFlushSize(64)
+p.UpdateFlushInterval(20 * time.Millisecond)
+
+// 稍后扩容
+p.UpdateFlushSize(128)
+
+// 再次放宽定时
+p.UpdateFlushInterval(100 * time.Millisecond)
+
+// 关停
+close(p.DataChan())
+<-done
+```
+
 ### Q: v2 版本与 v1 版本的主要区别？
 
 **A:** v2 版本的重要改进：

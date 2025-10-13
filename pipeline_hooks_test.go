@@ -1,4 +1,4 @@
-package gopipeline
+package gopipeline_test
 
 import (
 	"bytes"
@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
 var dhFlushCount int32
@@ -30,12 +32,12 @@ func (dummyHook) ErrorDropped()                           { atomic.AddInt32(&dhD
 // 通过 Start 启动的 Perform 完成时关闭。我们仍然建议用户
 // 将 Start(ctx) 返回的 done 作为主要的完成信号。
 func TestDoneChannelWithStart(t *testing.T) {
-	cfg := NewPipelineConfig().
+	cfg := gopipeline.NewPipelineConfig().
 		WithBufferSize(16).
 		WithFlushSize(1).
 		WithFlushInterval(10 * time.Millisecond)
 
-	p := NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
+	p := gopipeline.NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
 		return nil
 	})
 
@@ -82,13 +84,13 @@ func TestWithMetricsHook(t *testing.T) {
 	atomic.StoreInt32(&dhDroppedCount, 0)
 
 	// 通过 WithMetrics 设置钩子，并触发至少一次 flush。
-	cfg := NewPipelineConfig().
+	cfg := gopipeline.NewPipelineConfig().
 		WithBufferSize(32).
 		WithFlushSize(8).
 		WithFlushInterval(24 * time.Hour) // 避免基于计时器的 flush
 
 	// 通过短暂的休眠制造可测量的持续时间。
-	p := NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
+	p := gopipeline.NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
 		return nil
 	})
 
@@ -127,7 +129,7 @@ func TestWithMetricsHook(t *testing.T) {
 	// 至少应发生一次 flush。我们将快速重新运行一次同步的 perform，
 	// 使用计数包装器以确保在 CI 中覆盖钩子路径。
 	var count int32
-	p2 := NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
+	p2 := gopipeline.NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
 		atomic.AddInt32(&count, 1)
 		return nil
 	})
@@ -157,12 +159,12 @@ func TestWithLogger(t *testing.T) {
 	var buf bytes.Buffer
 	logger := log.New(&buf, "pipeline-test: ", log.LstdFlags)
 
-	cfg := NewPipelineConfig().
+	cfg := gopipeline.NewPipelineConfig().
 		WithBufferSize(16).
 		WithFlushSize(8).
 		WithFlushInterval(5 * time.Millisecond)
 
-	p := NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
+	p := gopipeline.NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
 		// 不产生错误；日志行为由实现定义
 		return nil
 	}).WithLogger(logger)

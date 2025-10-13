@@ -1,10 +1,12 @@
-package gopipeline
+package gopipeline_test
 
 import (
 	"context"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
 // TestMaxConcurrentFlushes verifies that asynchronous flush concurrency
@@ -52,13 +54,13 @@ func TestMaxConcurrentFlushes(t *testing.T) {
 			}
 
 			// 配置：FlushSize 小一些，BufferSize 足够大；FlushInterval 很大以避免定时触发。
-			cfg := NewPipelineConfig().
+			cfg := gopipeline.NewPipelineConfig().
 				WithBufferSize(4096).
 				WithFlushSize(16).
 				WithFlushInterval(24 * time.Hour).
 				WithMaxConcurrentFlushes(tc.maxConc)
 
-			p := NewStandardPipeline[int](cfg, flush)
+			p := gopipeline.NewStandardPipeline[int](cfg, flush)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

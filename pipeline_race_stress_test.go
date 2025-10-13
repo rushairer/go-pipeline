@@ -1,4 +1,4 @@
-package gopipeline
+package gopipeline_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
 // These tests are intended to be run with: go test -race -run Race -count=1
@@ -25,7 +27,7 @@ func makeSlowFlush(d time.Duration, ret error) func(context.Context, []int) erro
 
 // Race: concurrent second start should not corrupt done channel; second attempt surfaces ErrAlreadyRunning via errs.
 func TestRace_ConcurrentSecondStart(t *testing.T) {
-	p := NewDefaultStandardPipeline(makeSlowFlush(5*time.Millisecond, nil))
+	p := gopipeline.NewDefaultStandardPipeline(makeSlowFlush(5*time.Millisecond, nil))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -55,7 +57,7 @@ func TestRace_ConcurrentSecondStart(t *testing.T) {
 	close(errCh)
 	var sawAlreadyRunning bool
 	for e := range errCh {
-		if errors.Is(e, ErrAlreadyRunning) {
+		if errors.Is(e, gopipeline.ErrAlreadyRunning) {
 			sawAlreadyRunning = true
 			break
 		}
@@ -71,12 +73,12 @@ func TestRace_ConcurrentSecondStart(t *testing.T) {
 // Race: data channel close vs context cancel around the same time.
 func TestRace_CloseVsCancel(t *testing.T) {
 	// common pipeline builder without FinalFlushOnCloseTimeout to reduce timing interference
-	newPipe := func() *StandardPipeline[int] {
-		cfg := NewPipelineConfig().
+	newPipe := func() *gopipeline.StandardPipeline[int] {
+		cfg := gopipeline.NewPipelineConfig().
 			WithBufferSize(256).
 			WithFlushSize(32).
 			WithFlushInterval(5 * time.Millisecond)
-		return NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
+		return gopipeline.NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
 			// small work to tick the loop; always respect ctx
 			select {
 			case <-time.After(100 * time.Microsecond):
@@ -214,13 +216,13 @@ func TestRace_MaxConcurrentFlushes(t *testing.T) {
 		return nil
 	}
 
-	cfg := NewPipelineConfig().
+	cfg := gopipeline.NewPipelineConfig().
 		WithBufferSize(4096).
 		WithFlushSize(32).
 		WithFlushInterval(500 * time.Millisecond). // avoid timer flush; we push by size
 		WithMaxConcurrentFlushes(2)
 
-	p := NewStandardPipeline[int](cfg, flush)
+	p := gopipeline.NewStandardPipeline[int](cfg, flush)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

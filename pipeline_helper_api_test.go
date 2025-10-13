@@ -1,4 +1,4 @@
-package gopipeline
+package gopipeline_test
 
 import (
 	"context"
@@ -6,10 +6,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
 // 一个不会报错的 flush 函数，统计调用次数
-func okFlush[T any](calls *int32) FlushStandardFunc[T] {
+func okFlush[T any](calls *int32) gopipeline.FlushStandardFunc[T] {
 	return func(ctx context.Context, batch []T) error {
 		atomic.AddInt32(calls, 1)
 		return nil
@@ -17,8 +19,8 @@ func okFlush[T any](calls *int32) FlushStandardFunc[T] {
 }
 
 // 快速配置，降低测试时延
-func quickConfig() PipelineConfig {
-	return PipelineConfig{
+func quickConfig() gopipeline.PipelineConfig {
+	return gopipeline.PipelineConfig{
 		BufferSize:               16,
 		FlushSize:                4,
 		FlushInterval:            10 * time.Millisecond,
@@ -31,7 +33,7 @@ func quickConfig() PipelineConfig {
 
 func TestStart_ReturnsDoneAndErrs_SecondStartYieldsErrAlreadyRunning(t *testing.T) {
 	var calls int32
-	p := NewStandardPipeline[int](quickConfig(), okFlush[int](&calls))
+	p := gopipeline.NewStandardPipeline[int](quickConfig(), okFlush[int](&calls))
 
 	// Start 第一次
 	ctx, cancel := context.WithCancel(context.Background())
@@ -52,7 +54,7 @@ readLoop:
 	for {
 		select {
 		case err := <-errs:
-			if errors.Is(err, ErrAlreadyRunning) {
+			if errors.Is(err, gopipeline.ErrAlreadyRunning) {
 				gotErrAlreadyRunning = true
 				break readLoop
 			}
@@ -82,7 +84,7 @@ readLoop:
 
 func TestRun_BlocksUntilCancelAndReturnsContextError(t *testing.T) {
 	var calls int32
-	p := NewStandardPipeline[int](quickConfig(), okFlush[int](&calls))
+	p := gopipeline.NewStandardPipeline[int](quickConfig(), okFlush[int](&calls))
 
 	// 为确保错误通道容量被设置，传入一个自定义容量
 	errChSize := 8
@@ -107,7 +109,7 @@ func TestRun_BlocksUntilCancelAndReturnsContextError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Run should return an error on cancel")
 	}
-	if !errors.Is(err, ErrContextIsClosed) {
+	if !errors.Is(err, gopipeline.ErrContextIsClosed) {
 		t.Fatalf("expected Run error to satisfy errors.Is(_, ErrContextIsClosed), got: %v", err)
 	}
 	// 合理的返回时间（避免无限阻塞）

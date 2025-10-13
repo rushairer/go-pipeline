@@ -1,4 +1,4 @@
-package gopipeline
+package gopipeline_test
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
 // TestFinalFlushOnCloseTimeout verifies that on the channel-close path
@@ -39,13 +41,13 @@ func TestFinalFlushOnCloseTimeout(t *testing.T) {
 		}
 	}
 
-	cfg := NewPipelineConfig().
+	cfg := gopipeline.NewPipelineConfig().
 		WithBufferSize(16).
 		WithFlushSize(8).
 		WithFlushInterval(24 * time.Hour). // avoid timer-driven flush
 		WithFinalFlushOnCloseTimeout(finalTimeout)
 
-	p := NewStandardPipeline[int](cfg, flush)
+	p := gopipeline.NewStandardPipeline[int](cfg, flush)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -122,13 +124,13 @@ func TestFinalFlushOnCloseTimeout_Disabled(t *testing.T) {
 		return nil
 	}
 
-	cfg := NewPipelineConfig().
+	cfg := gopipeline.NewPipelineConfig().
 		WithBufferSize(16).
 		WithFlushSize(8).
 		WithFlushInterval(24 * time.Hour). // avoid timer-driven flush
 		WithFinalFlushOnCloseTimeout(0)    // disabled
 
-	p := NewStandardPipeline[int](cfg, flush)
+	p := gopipeline.NewStandardPipeline[int](cfg, flush)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -180,13 +182,13 @@ func TestFinalFlushOnCloseTimeout_ErrorSurfaceOptional(t *testing.T) {
 		}
 	}
 
-	cfg := NewPipelineConfig().
+	cfg := gopipeline.NewPipelineConfig().
 		WithBufferSize(8).
 		WithFlushSize(4).
 		WithFlushInterval(24 * time.Hour).
 		WithFinalFlushOnCloseTimeout(finalTimeout)
 
-	p := NewStandardPipeline[string](cfg, flush)
+	p := gopipeline.NewStandardPipeline[string](cfg, flush)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

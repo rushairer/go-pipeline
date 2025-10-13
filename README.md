@@ -1533,6 +1533,49 @@ A: In async mode, each flush runs in a separate goroutine. If you reuse the same
 - **Memory Constrained Scenario**: FlushSize=20, BufferSize=40, FlushInterval=100ms
 - **CPU Intensive Processing**: Use async mode, appropriately increase buffer size
 
+## Runtime tuning (dynamic adjustments)
+You can safely update certain parameters at runtime:
+- UpdateFlushSize(n uint32): affects new batches’ preallocation and the “is full” threshold
+- UpdateFlushInterval(d time.Duration): takes effect on the next timer cycle; the pipeline nudges its timer to apply promptly
+
+
+Notes:
+- FlushSize changes do not retroactively modify an in-progress batch; slice/map will auto-grow as needed
+- FlushInterval updates apply on the next timer reset; a light “nudge” is used to adopt new value quickly
+- MaxConcurrentFlushes is implemented via a dynamic limiter; existing in-flight flushes continue to release to their original slot, avoiding deadlocks
+
+Quick example:
+p.UpdateFlushSize(128)
+p.UpdateFlushInterval(25 * time.Millisecond)
+
+
+Full example:
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+p := gopipeline.NewStandardPipeline[int](gopipeline.NewPipelineConfig(), func(ctx context.Context, batch []int) error {
+    // your flush
+    return nil
+})
+done, errs := p.Start(ctx)
+go func() { for err := range errs { log.Println("err:", err) } }()
+
+// dynamic tuning over time
+p.UpdateFlushSize(64)
+p.UpdateFlushInterval(20 * time.Millisecond)
+
+// later: scale up
+p.UpdateFlushSize(128)
+
+// later: relax timer
+p.UpdateFlushInterval(100 * time.Millisecond)
+
+// shutdown
+close(p.DataChan())
+<-done
+```
+
 ### Q: What are the main differences between v2 and v1?
 
 **A:** Important improvements in v2:

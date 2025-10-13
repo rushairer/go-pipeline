@@ -38,6 +38,11 @@ type PipelineImpl[T any] struct {
 	running  int32         // 0=未运行, 1=运行中（并发启动保护）
 	flushSem chan struct{} // 异步 flush 并发上限（nil 表示不限制）
 
+	// 动态可调参数（运行时）
+	currFlushSize     atomic.Uint32 // 当前 FlushSize
+	currFlushInterval atomic.Int64  // 当前 FlushInterval（ns）
+	nudge             chan struct{} // 轻推信号：用于立即重置计时器
+
 	// 可选注入：日志与指标
 	logger  *log.Logger
 	metrics MetricsHook
@@ -70,10 +75,17 @@ func NewPipelineImpl[T any](
 		dataChan:  make(chan T, config.BufferSize),
 		processor: processor,
 		errorChan: nil,
+		nudge:     make(chan struct{}, 1),
 	}
+	// 初始化动态参数
+	p.currFlushSize.Store(config.FlushSize)
+	p.currFlushInterval.Store(int64(config.FlushInterval))
+
+	// 初始化固定容量的并发信号量（0 表示不限制）
 	if config.MaxConcurrentFlushes > 0 {
 		p.flushSem = make(chan struct{}, int(config.MaxConcurrentFlushes))
 	}
+
 	return p
 }
 
@@ -143,8 +155,9 @@ func (p *PipelineImpl[T]) performLoop(
 		p.runMu.Unlock()
 	}()
 
-	ticker := time.NewTicker(p.config.FlushInterval)
-	defer ticker.Stop()
+	// 使用可重置的 timer，使 FlushInterval 的动态更新在下一次触发时生效
+	timer := time.NewTimer(p.CurrentFlushInterval())
+	defer timer.Stop()
 
 	batchData := p.processor.initBatchData()
 
@@ -173,12 +186,37 @@ func (p *PipelineImpl[T]) performLoop(
 			}
 			p.doFlush(ctx, async, batchData)
 			batchData = p.processor.initBatchData()
-		case <-ticker.C:
-			if p.processor.isBatchEmpty(batchData) {
-				continue
+		case <-timer.C:
+			// 定时触发：空批则跳过，但仍需重置定时器
+			if !p.processor.isBatchEmpty(batchData) {
+				p.doFlush(ctx, async, batchData)
+				batchData = p.processor.initBatchData()
 			}
-			p.doFlush(ctx, async, batchData)
-			batchData = p.processor.initBatchData()
+			// 重置下一次触发时间，读取当前可调的 FlushInterval
+			next := p.CurrentFlushInterval()
+			if next <= 0 {
+				next = time.Millisecond * 50
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(next)
+		case <-p.nudge:
+			// 轻推：仅重置计时器到当前 FlushInterval，不触发 flush
+			next := p.CurrentFlushInterval()
+			if next <= 0 {
+				next = time.Millisecond * 50
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(next)
 		case <-ctx.Done():
 			// 取消退出语义：
 			// - DrainOnCancel=false：不做最终 flush，返回 ErrContextIsClosed（可用 errors.Is(err, ErrContextIsClosed) 判断）
@@ -434,4 +472,39 @@ func (p *PipelineImpl[T]) Start(ctx context.Context) (<-chan struct{}, <-chan er
 func (p *PipelineImpl[T]) Run(ctx context.Context, errBuf int) error {
 	_ = p.ErrorChan(errBuf)
 	return p.SyncPerform(ctx)
+}
+
+// 动态并发限流：获取当前 channel 引用；nil 表示不限流
+func (p *PipelineImpl[T]) acquireFlushSlot() chan struct{} {
+	// 已恢复为固定容量的并发信号量实现，此方法不再使用
+	return p.flushSem
+}
+
+// 动态参数：FlushSize
+func (p *PipelineImpl[T]) CurrentFlushSize() uint32 {
+	return p.currFlushSize.Load()
+}
+
+func (p *PipelineImpl[T]) UpdateFlushSize(n uint32) {
+	if n == 0 {
+		n = 1
+	}
+	p.currFlushSize.Store(n)
+}
+
+// 动态参数：FlushInterval
+func (p *PipelineImpl[T]) CurrentFlushInterval() time.Duration {
+	return time.Duration(p.currFlushInterval.Load())
+}
+
+func (p *PipelineImpl[T]) UpdateFlushInterval(d time.Duration) {
+	if d <= 0 {
+		d = time.Millisecond * 1
+	}
+	p.currFlushInterval.Store(int64(d))
+	// 轻推主循环，确保新的间隔尽快生效
+	select {
+	case p.nudge <- struct{}{}:
+	default:
+	}
 }

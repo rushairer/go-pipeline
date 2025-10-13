@@ -55,8 +55,8 @@ func NewStandardPipeline[T any](
 // initBatchData 初始化一个新的批处理数据切片
 // 返回值: 返回一个空的类型T切片
 func (p *StandardPipeline[T]) initBatchData() any {
-	// 预分配容量以减少扩容与分配
-	return make([]T, 0, int(p.config.FlushSize))
+	// 预分配容量以减少扩容与分配（读取当前可调的 FlushSize）
+	return make([]T, 0, int(p.CurrentFlushSize()))
 }
 
 // addToBatch 将新数据添加到批处理数据切片中
@@ -85,7 +85,7 @@ func (p *StandardPipeline[T]) flush(ctx context.Context, batchData any) error {
 //
 // 返回值: 如果数据量达到或超过配置的FlushSize则返回true
 func (p *StandardPipeline[T]) isBatchFull(batchData any) bool {
-	return len(batchData.([]T)) >= int(p.config.FlushSize)
+	return len(batchData.([]T)) >= int(p.CurrentFlushSize())
 }
 
 // isBatchEmpty 检查批处理数据切片是否为空

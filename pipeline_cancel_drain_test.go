@@ -1,4 +1,4 @@
-package gopipeline
+package gopipeline_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
 // 满足去重管道所需的唯一键接口
@@ -17,12 +19,12 @@ func (u user) GetKey() string { return u.id }
 // 标准管道：默认 DrainOnCancel=false，cancel 不应 flush 未满批次
 func TestStandard_Cancel_NoDrain_DoesNotFlush(t *testing.T) {
 	var processed int64
-	config := NewPipelineConfig().
+	config := gopipeline.NewPipelineConfig().
 		WithBufferSize(100).
 		WithFlushSize(50).
 		WithFlushInterval(50 * time.Millisecond) // 未满批次不应因 cancel 而 flush
 
-	p := NewStandardPipeline[int](config, func(ctx context.Context, batch []int) error {
+	p := gopipeline.NewStandardPipeline[int](config, func(ctx context.Context, batch []int) error {
 		atomic.AddInt64(&processed, int64(len(batch)))
 		return nil
 	})
@@ -48,10 +50,10 @@ func TestStandard_Cancel_NoDrain_DoesNotFlush(t *testing.T) {
 	// 等待退出并断言错误
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, ErrContextIsClosed) {
+		if !errors.Is(err, gopipeline.ErrContextIsClosed) {
 			t.Fatalf("expected ErrContextIsClosed, got %v", err)
 		}
-		if errors.Is(err, ErrContextDrained) {
+		if errors.Is(err, gopipeline.ErrContextDrained) {
 			t.Fatalf("should not be drained when DrainOnCancel=false, got %v", err)
 		}
 	case <-time.After(1 * time.Second):
@@ -67,14 +69,14 @@ func TestStandard_Cancel_NoDrain_DoesNotFlush(t *testing.T) {
 // 标准管道：DrainOnCancel=true + Grace，cancel 时尽力 flush 未满批次
 func TestStandard_Cancel_WithDrain_FlushesPartial(t *testing.T) {
 	var processed int64
-	config := NewPipelineConfig().
+	config := gopipeline.NewPipelineConfig().
 		WithBufferSize(100).
 		WithFlushSize(50).
 		WithFlushInterval(10 * time.Second). // 很长间隔，确保不会被定时触发
 		WithDrainOnCancel(true).
 		WithDrainGracePeriod(200 * time.Millisecond)
 
-	p := NewStandardPipeline[int](config, func(ctx context.Context, batch []int) error {
+	p := gopipeline.NewStandardPipeline[int](config, func(ctx context.Context, batch []int) error {
 		atomic.AddInt64(&processed, int64(len(batch)))
 		return nil
 	})
@@ -95,10 +97,10 @@ func TestStandard_Cancel_WithDrain_FlushesPartial(t *testing.T) {
 	// 等待退出并断言错误组合
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, ErrContextIsClosed) {
+		if !errors.Is(err, gopipeline.ErrContextIsClosed) {
 			t.Fatalf("expected ErrContextIsClosed, got %v", err)
 		}
-		if !errors.Is(err, ErrContextDrained) {
+		if !errors.Is(err, gopipeline.ErrContextDrained) {
 			t.Fatalf("expected ErrContextDrained when DrainOnCancel=true, got %v", err)
 		}
 	case <-time.After(1 * time.Second):
@@ -123,12 +125,12 @@ func TestStandard_Cancel_WithDrain_FlushesPartial(t *testing.T) {
 // 标准管道：关闭通道后必然 flush（即便 ctx 已取消）
 func TestStandard_CloseChannel_AlwaysFlush(t *testing.T) {
 	var processed int64
-	config := NewPipelineConfig().
+	config := gopipeline.NewPipelineConfig().
 		WithBufferSize(100).
 		WithFlushSize(50).
 		WithFlushInterval(50 * time.Millisecond)
 
-	p := NewStandardPipeline[int](config, func(ctx context.Context, batch []int) error {
+	p := gopipeline.NewStandardPipeline[int](config, func(ctx context.Context, batch []int) error {
 		atomic.AddInt64(&processed, int64(len(batch)))
 		return nil
 	})
@@ -173,12 +175,12 @@ func TestStandard_CloseChannel_AlwaysFlush(t *testing.T) {
 func TestDedup_Cancel_NoDrain_DoesNotFlush(t *testing.T) {
 	var processed int64
 
-	config := NewPipelineConfig().
+	config := gopipeline.NewPipelineConfig().
 		WithBufferSize(100).
 		WithFlushSize(50).
 		WithFlushInterval(50 * time.Millisecond)
 
-	p := NewDeduplicationPipeline[user](config, func(ctx context.Context, batch map[string]user) error {
+	p := gopipeline.NewDeduplicationPipeline[user](config, func(ctx context.Context, batch map[string]user) error {
 		atomic.AddInt64(&processed, int64(len(batch)))
 		return nil
 	})
@@ -200,10 +202,10 @@ func TestDedup_Cancel_NoDrain_DoesNotFlush(t *testing.T) {
 	// 等待退出并断言错误
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, ErrContextIsClosed) {
+		if !errors.Is(err, gopipeline.ErrContextIsClosed) {
 			t.Fatalf("expected ErrContextIsClosed, got %v", err)
 		}
-		if errors.Is(err, ErrContextDrained) {
+		if errors.Is(err, gopipeline.ErrContextDrained) {
 			t.Fatalf("should not be drained when DrainOnCancel=false (dedup), got %v", err)
 		}
 	case <-time.After(1 * time.Second):
@@ -219,14 +221,14 @@ func TestDedup_Cancel_NoDrain_DoesNotFlush(t *testing.T) {
 func TestDedup_Cancel_WithDrain_FlushesPartial(t *testing.T) {
 	var processed int64
 
-	config := NewPipelineConfig().
+	config := gopipeline.NewPipelineConfig().
 		WithBufferSize(100).
 		WithFlushSize(50).
 		WithFlushInterval(10 * time.Second).
 		WithDrainOnCancel(true).
 		WithDrainGracePeriod(200 * time.Millisecond)
 
-	p := NewDeduplicationPipeline[user](config, func(ctx context.Context, batch map[string]user) error {
+	p := gopipeline.NewDeduplicationPipeline[user](config, func(ctx context.Context, batch map[string]user) error {
 		atomic.AddInt64(&processed, int64(len(batch))) // 这里是唯一键数量
 		return nil
 	})
@@ -247,10 +249,10 @@ func TestDedup_Cancel_WithDrain_FlushesPartial(t *testing.T) {
 	// 等待退出并断言错误组合
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, ErrContextIsClosed) {
+		if !errors.Is(err, gopipeline.ErrContextIsClosed) {
 			t.Fatalf("expected ErrContextIsClosed, got %v", err)
 		}
-		if !errors.Is(err, ErrContextDrained) {
+		if !errors.Is(err, gopipeline.ErrContextDrained) {
 			t.Fatalf("expected ErrContextDrained when DrainOnCancel=true (dedup), got %v", err)
 		}
 	case <-time.After(1 * time.Second):
@@ -275,12 +277,12 @@ func TestDedup_Cancel_WithDrain_FlushesPartial(t *testing.T) {
 func TestDedup_CloseChannel_AlwaysFlush(t *testing.T) {
 	var processed int64
 
-	config := NewPipelineConfig().
+	config := gopipeline.NewPipelineConfig().
 		WithBufferSize(100).
 		WithFlushSize(50).
 		WithFlushInterval(50 * time.Millisecond)
 
-	p := NewDeduplicationPipeline[user](config, func(ctx context.Context, batch map[string]user) error {
+	p := gopipeline.NewDeduplicationPipeline[user](config, func(ctx context.Context, batch map[string]user) error {
 		atomic.AddInt64(&processed, int64(len(batch)))
 		return nil
 	})
