@@ -191,3 +191,117 @@ func TestWithLogger(t *testing.T) {
 	}
 	// 可选地，我们可以检查 buf.Len() >= 0（显然恒为真）。
 }
+
+// 断言：Done() 关闭后进行两值接收，ok 恒为 false（DrainOnCancel=true）
+func TestDoneTwoValueRecv_DrainOnCancel(t *testing.T) {
+	cfg := gopipeline.NewPipelineConfig().
+		WithBufferSize(64).
+		WithFlushSize(16).
+		WithFlushInterval(200 * time.Millisecond).
+		WithDrainOnCancel(true).
+		WithDrainGracePeriod(200 * time.Millisecond)
+
+	// flush 函数要严格尊重 ctx，避免超出收尾窗口
+	p := gopipeline.NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+			return nil
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	doneFromStart, _ := p.Start(ctx)
+	// 获取 Done 快照（与当前运行对应）
+	doneSnap := p.Done()
+
+	// 投递一些数据，随后取消触发收尾路径
+	ch := p.DataChan()
+	go func() {
+		for i := 0; i < 50; i++ {
+			select {
+			case ch <- i:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// 小延时后取消，促使进入 DrainOnCancel 分支
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	// 等待本次运行结束
+	select {
+	case <-doneFromStart:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting pipeline to finish with drain")
+	}
+
+	// 两值接收断言：ok 必为 false（通道已关闭且未发送值）
+	select {
+	case _, ok := <-doneSnap:
+		if ok {
+			t.Fatalf("expected ok=false on closed done channel with drain, got true")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("timeout reading from done snapshot")
+	}
+}
+
+// 断言：Done() 关闭后进行两值接收，ok 恒为 false（DrainOnCancel=false，且取消时缓冲区可能尚有元素）
+func TestDoneTwoValueRecv_NoDrain_BufferLeft(t *testing.T) {
+	cfg := gopipeline.NewPipelineConfig().
+		WithBufferSize(64).
+		WithFlushSize(32).
+		WithFlushInterval(1 * time.Hour). // 避免计时器触发
+		WithDrainOnCancel(false)
+
+	// 模拟较慢 flush；取消时不会收尾，缓冲可能残留
+	p := gopipeline.NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
+		select {
+		case <-time.After(300 * time.Millisecond):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond) // 比处理慢，确保会超时
+	defer cancel()
+
+	doneFromStart, _ := p.Start(ctx)
+	doneSnap := p.Done()
+
+	// 快速投递一些数据，使取消时缓冲可能仍有剩余
+	ch := p.DataChan()
+	go func() {
+		for i := 0; i < 100; i++ {
+			select {
+			case ch <- i:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// 等待结束（由外部超时驱动）
+	select {
+	case <-doneFromStart:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting pipeline to finish without drain")
+	}
+
+	// 两值接收断言：ok 必为 false
+	select {
+	case _, ok := <-doneSnap:
+		if ok {
+			t.Fatalf("expected ok=false on closed done channel without drain, got true")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("timeout reading from done snapshot")
+	}
+}

@@ -8,11 +8,11 @@
 [![Latest Release](https://img.shields.io/github/v/release/rushairer/go-pipeline.svg)](https://github.com/rushairer/go-pipeline/releases)
 [![License](https://img.shields.io/github/license/rushairer/go-pipeline.svg)](https://github.com/rushairer/go-pipeline/blob/main/LICENSE)
 
-A high-performance Go batch processing pipeline framework with generics support, concurrency safety, providing both standard batch processing and deduplication batch processing modes.
+A high-performance, concurrency-safe Go pipeline with generics, offering size/time-window batching, backpressure and graceful shutdown, error/metrics hooks, rate-limited async flush with dynamic tuning, in both standard and dedup modes.
 
 ## 📋 System Requirements
 
-- Go 1.18+ (with generics support)
+- Go 1.20+ (with generics support)
 - Supports Linux, macOS, Windows
 
 ## 📦 Installation
@@ -23,7 +23,7 @@ go get github.com/rushairer/go-pipeline/v2@latest
 
 ## 🚀 Features
 
-- **Generics Support**: Type-safe implementation based on Go 1.18+ generics
+- **Generics Support**: Type-safe implementation based on Go 1.20+ generics
 - **Batch Processing**: Automatic batching by size and time intervals
 - **Concurrency Safety**: Built-in goroutine safety mechanisms
 - **Flexible Configuration**: Customizable buffer size, batch size, and flush intervals
