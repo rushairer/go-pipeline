@@ -32,37 +32,18 @@ go get github.com/rushairer/go-pipeline/v2@latest
 - **Sync/Async**: Support for both synchronous and asynchronous execution modes
 - **Go Conventions**: Follows "writer closes" channel management principle
 
-## 📁 Project Structure
 
-```
-.
-├── config.go
-├── errors.go
-├── interface.go
-├── pipeline_impl.go
-├── pipeline_standard.go
-├── pipeline_deduplication.go
-├── pipeline_standard_test.go
-├── pipeline_standard_benchmark_test.go
-├── pipeline_deduplication_test.go
-├── pipeline_deduplication_benchmark_test.go
-├── pipeline_cancel_drain_test.go
-├── pipeline_concurrency_test.go
-├── pipeline_error_chan_test.go
-├── pipeline_error_handling_test.go
-├── pipeline_helper_api_test.go
-├── pipeline_performance_benchmark_test.go
-├── README.md
-├── README_cn.md
-├── RELEASE_NOTES_v2.2.0-beta.md
-├── go.mod
-├── go.sum
-├── LICENSE
-├── Makefile
-├── .github/
-├── .vscode/
-└── .codebuddy/
-```
+### Test File Descriptions
+
+The project includes a complete test suite to ensure code quality and performance:
+
+- **`pipeline_standard_test.go`**: Unit tests for standard pipeline, verifying basic functionality
+- **`pipeline_deduplication_test.go`**: Unit tests for deduplication pipeline, verifying deduplication logic
+- **`pipeline_standard_benchmark_test.go`**: Performance benchmark tests for standard pipeline
+- **`pipeline_deduplication_benchmark_test.go`**: Performance benchmark tests for deduplication pipeline
+- **`pipeline_performance_benchmark_test.go`**: Comprehensive performance benchmark tests
+- **`pipeline_memory_behavior_test.go`**: Validates memory semantics when sending different payload types via `DataChan`: arrays are value-copied; slices copy only headers and share underlying data; pointers copy only the pointer (no duplicate memory) and share the target object
+
 
 ## 📦 Core Components
 
@@ -124,16 +105,6 @@ graph TD
 Notes:
 - On channel-close path, a final synchronous flush is performed; if `FinalFlushOnCloseTimeout > 0`, it runs under a context with timeout. Your flush function must respect the provided context to exit timely.
 - If configured, async flush concurrency is limited by `MaxConcurrentFlushes` (0 = unlimited).
-
-### Test File Descriptions
-
-The project includes a complete test suite to ensure code quality and performance:
-
-- **`pipeline_standard_test.go`**: Unit tests for standard pipeline, verifying basic functionality
-- **`pipeline_deduplication_test.go`**: Unit tests for deduplication pipeline, verifying deduplication logic
-- **`pipeline_standard_benchmark_test.go`**: Performance benchmark tests for standard pipeline
-- **`pipeline_deduplication_benchmark_test.go`**: Performance benchmark tests for deduplication pipeline
-- **`pipeline_performance_benchmark_test.go`**: Comprehensive performance benchmark tests
 
 ### Deduplication Pipeline Flow
 
@@ -1223,6 +1194,25 @@ func gracefulShutdown(pipeline *gopipeline.StandardPipeline[Task]) {
     }
 }
 ```
+
+## 📦 Data Type Semantics & Performance (DataChan payload)
+
+When sending data via `DataChan() chan<- T`, the choice of `T` affects memory behavior and performance:
+
+- Integers (`int`, `int64`, etc.): pure value copy; small and efficient.
+- `string`: only the string header (pointer+len) is copied; underlying bytes are not copied. Usually efficient, but beware of sharing the underlying bytes if mutated elsewhere.
+- Arrays (`[N]T`): the whole array value is copied when sent through the channel. Large `N` increases CPU/memory copy cost.
+- Slices (`[]T`): only the slice header (ptr/len/cap) is copied; underlying array is shared. If the producer mutates or reuses the backing array after sending, the pipeline will observe those mutations. Ensure immutability after send or copy on write.
+- Pointers (`*T`): only the pointer value is copied; no duplicate copy of the pointed data. This avoids memory duplication but shares the same object. Guarantee data-race safety and immutability after send.
+- Structs: copied by value; consider size. For large payloads, prefer `[]byte` or `*Large` and manage immutability explicitly.
+
+Recommendations:
+- Prefer immutable payloads after sending. If you must mutate producer buffers, send a copy (e.g., `append([]byte(nil), b...)`).
+- For high-throughput with large items, prefer `[]byte` or pointers and treat buffers/objects as immutable once sent.
+- In async mode, the pipeline swaps batch containers on flush; do not reset and reuse the same backing storage that a concurrent flush goroutine may still read.
+
+Validation tests:
+- See `pipeline_memory_behavior_test.go` for examples validating array copy vs. slice/pointer sharing.
 
 ## ⚡ Performance Characteristics
 
