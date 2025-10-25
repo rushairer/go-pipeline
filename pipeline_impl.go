@@ -474,12 +474,6 @@ func (p *PipelineImpl[T]) Run(ctx context.Context, errBuf int) error {
 	return p.SyncPerform(ctx)
 }
 
-// 动态并发限流：获取当前 channel 引用；nil 表示不限流
-func (p *PipelineImpl[T]) acquireFlushSlot() chan struct{} {
-	// 已恢复为固定容量的并发信号量实现，此方法不再使用
-	return p.flushSem
-}
-
 // 动态参数：FlushSize
 func (p *PipelineImpl[T]) CurrentFlushSize() uint32 {
 	return p.currFlushSize.Load()
