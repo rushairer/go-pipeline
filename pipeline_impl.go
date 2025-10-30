@@ -186,6 +186,9 @@ func (p *PipelineImpl[T]) performLoop(
 			}
 			p.doFlush(ctx, async, batchData)
 			batchData = p.processor.initBatchData()
+
+			// 重置 timer，避免过早触发下一次 flush
+			p.resetTimer(timer)
 		case <-timer.C:
 			// 定时触发：空批则跳过，但仍需重置定时器
 			if !p.processor.isBatchEmpty(batchData) {
@@ -193,30 +196,10 @@ func (p *PipelineImpl[T]) performLoop(
 				batchData = p.processor.initBatchData()
 			}
 			// 重置下一次触发时间，读取当前可调的 FlushInterval
-			next := p.CurrentFlushInterval()
-			if next <= 0 {
-				next = time.Millisecond * 50
-			}
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(next)
+			p.resetTimer(timer)
 		case <-p.nudge:
 			// 轻推：仅重置计时器到当前 FlushInterval，不触发 flush
-			next := p.CurrentFlushInterval()
-			if next <= 0 {
-				next = time.Millisecond * 50
-			}
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(next)
+			p.resetTimer(timer)
 		case <-ctx.Done():
 			// 取消退出语义：
 			// - DrainOnCancel=false：不做最终 flush，返回 ErrContextIsClosed（可用 errors.Is(err, ErrContextIsClosed) 判断）
@@ -332,6 +315,27 @@ func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any)
 			p.metrics.Error(err)
 		}
 	}
+}
+
+// resetTimer 安全地将定时器重置为当前的刷新间隔。
+// 在重置之前，它会先排空定时器通道，以防止因竞态条件导致的“幽灵触发”。
+func (p *PipelineImpl[T]) resetTimer(timer *time.Timer) {
+	next := p.CurrentFlushInterval()
+	if next <= 0 {
+		// 提供一个默认的最小间隔，以防止在间隔为0或负数时出现忙循环。
+		next = time.Millisecond * 50
+	}
+
+	// 这是防止竞争条件的关键部分。
+	// 尝试停止定时器。如果 timer.Stop() 返回 false，说明定时器已经触发或已被停止，
+	// 其信号值可能仍在通道中，需要将其安全地排空。
+	if !timer.Stop() {
+		select {
+		case <-timer.C: // 确认通道中的旧信号已被消费。
+		default:
+		}
+	}
+	timer.Reset(next)
 }
 
 // 计算默认错误通道缓冲区大小

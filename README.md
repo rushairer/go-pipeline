@@ -37,12 +37,26 @@ go get github.com/rushairer/go-pipeline/v2@latest
 
 The project includes a complete test suite to ensure code quality and performance:
 
-- **`pipeline_standard_test.go`**: Unit tests for standard pipeline, verifying basic functionality
-- **`pipeline_deduplication_test.go`**: Unit tests for deduplication pipeline, verifying deduplication logic
+#### Core Functionality Tests
+- **`pipeline_standard_test.go`**: Unit tests for standard pipeline, verifying basic functionality and data flow
+- **`pipeline_deduplication_test.go`**: Unit tests for deduplication pipeline, verifying deduplication logic and unique key handling
+- **`pipeline_helper_api_test.go`**: Unit tests for convenience APIs (Start/Run), verifying simplified interfaces
+
+#### Advanced Feature Tests
+- **`pipeline_cancel_drain_test.go`**: Cancellation drain mechanism tests, verifying DrainOnCancel and graceful shutdown
+- **`pipeline_concurrency_test.go`**: Concurrency control tests, verifying MaxConcurrentFlushes limits
+- **`pipeline_error_chan_test.go`**: Error channel mechanism tests, verifying lazy initialization and non-blocking sends
+- **`pipeline_error_handling_test.go`**: Error handling flow tests, verifying error propagation and processing
+- **`pipeline_final_flush_timeout_test.go`**: Final flush timeout tests, verifying timeout protection on channel close
+- **`pipeline_max_concurrent_flushes_test.go`**: Maximum concurrent flushes tests, verifying async flush concurrency limits
+- **`pipeline_hooks_test.go`**: Hook mechanism tests, verifying Logger and Metrics hook functionality
+
+#### Performance and Stress Tests
 - **`pipeline_standard_benchmark_test.go`**: Performance benchmark tests for standard pipeline
 - **`pipeline_deduplication_benchmark_test.go`**: Performance benchmark tests for deduplication pipeline
-- **`pipeline_performance_benchmark_test.go`**: Comprehensive performance benchmark tests
-- **`pipeline_memory_behavior_test.go`**: Validates memory semantics when sending different payload types via `DataChan`: arrays are value-copied; slices copy only headers and share underlying data; pointers copy only the pointer (no duplicate memory) and share the target object
+- **`pipeline_performance_benchmark_test.go`**: Comprehensive performance benchmark tests comparing different batch sizes
+- **`pipeline_memory_behavior_test.go`**: Memory semantics validation tests, verifying memory behavior of different data types
+- **`pipeline_race_stress_test.go`**: Race condition stress tests, verifying concurrency safety (requires -race flag)
 
 
 ## 📦 Core Components
@@ -1711,6 +1725,10 @@ go func() {
     }
 }()
 ```
+
+## 📋 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and version history.
 
 ## 📄 License
 
