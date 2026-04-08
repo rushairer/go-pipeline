@@ -59,6 +59,14 @@ func (p *StandardPipeline[T]) initBatchData() any {
 	return make([]T, 0, int(p.CurrentFlushSize()))
 }
 
+func (p *StandardPipeline[T]) resetBatchData(batchData any) any {
+	return batchData.([]T)[:0]
+}
+
+func (p *StandardPipeline[T]) batchLen(batchData any) int {
+	return len(batchData.([]T))
+}
+
 // addToBatch 将新数据添加到批处理数据切片中
 // 参数:
 //   - batchData: 当前的批处理数据切片

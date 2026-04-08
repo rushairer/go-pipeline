@@ -68,6 +68,18 @@ func (p *DeduplicationPipeline[T]) initBatchData() any {
 	return make(map[string]T, int(p.CurrentFlushSize()))
 }
 
+func (p *DeduplicationPipeline[T]) resetBatchData(batchData any) any {
+	bd := batchData.(map[string]T)
+	for k := range bd {
+		delete(bd, k)
+	}
+	return bd
+}
+
+func (p *DeduplicationPipeline[T]) batchLen(batchData any) int {
+	return len(batchData.(map[string]T))
+}
+
 // addToBatch 将新数据添加到批处理容器中
 // 参数:
 //   - batchData: 当前的批处理数据容器

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +19,18 @@ type MetricsHook interface {
 	Error(err error)
 	// ErrorDropped 在错误通道满导致错误被丢弃时调用
 	ErrorDropped()
+}
+
+// batchResetter 允许同步路径在 flush 后复用批容器，避免重复分配。
+// 这是一个可选的内部扩展，不影响公开 DataProcessor 接口。
+type batchResetter interface {
+	resetBatchData(batchData any) any
+}
+
+// batchLenProvider 为 metrics 路径提供类型化的批大小计算，避免反射。
+// 这是一个可选的内部扩展，不影响公开 DataProcessor 接口。
+type batchLenProvider interface {
+	batchLen(batchData any) int
 }
 
 type PipelineImpl[T any] struct {
@@ -185,7 +196,7 @@ func (p *PipelineImpl[T]) performLoop(
 				continue
 			}
 			p.doFlush(ctx, async, batchData)
-			batchData = p.processor.initBatchData()
+			batchData = p.nextBatchData(batchData, async)
 
 			// 重置 timer，避免过早触发下一次 flush
 			p.resetTimer(timer)
@@ -193,7 +204,7 @@ func (p *PipelineImpl[T]) performLoop(
 			// 定时触发：空批则跳过，但仍需重置定时器
 			if !p.processor.isBatchEmpty(batchData) {
 				p.doFlush(ctx, async, batchData)
-				batchData = p.processor.initBatchData()
+				batchData = p.nextBatchData(batchData, async)
 			}
 			// 重置下一次触发时间，读取当前可调的 FlushInterval
 			p.resetTimer(timer)
@@ -228,7 +239,7 @@ func (p *PipelineImpl[T]) performLoop(
 						if p.processor.isBatchFull(batchData) {
 							// 批满则立即同步 flush，以免超过 grace 时间
 							p.doFlush(drainCtx, false, batchData)
-							batchData = p.processor.initBatchData()
+							batchData = p.nextBatchData(batchData, false)
 						}
 					default:
 						// 通道当前没有更多缓冲项（非阻塞抽干结束）
@@ -298,13 +309,17 @@ func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any)
 		}
 	}()
 
-	start := time.Now()
-	err := p.processor.flush(ctx, batchData)
-	dur := time.Since(start)
-
-	// metrics: flush
+	var (
+		err error
+		dur time.Duration
+	)
 	if p.metrics != nil {
-		p.metrics.Flush(batchLen(batchData), dur)
+		start := time.Now()
+		err = p.processor.flush(ctx, batchData)
+		dur = time.Since(start)
+		p.metrics.Flush(p.batchLen(batchData), dur)
+	} else {
+		err = p.processor.flush(ctx, batchData)
 	}
 
 	if err != nil {
@@ -315,6 +330,23 @@ func (p *PipelineImpl[T]) flushWithErrorChan(ctx context.Context, batchData any)
 			p.metrics.Error(err)
 		}
 	}
+}
+
+func (p *PipelineImpl[T]) nextBatchData(batchData any, async bool) any {
+	if async {
+		return p.processor.initBatchData()
+	}
+	if resetter, ok := p.processor.(batchResetter); ok {
+		return resetter.resetBatchData(batchData)
+	}
+	return p.processor.initBatchData()
+}
+
+func (p *PipelineImpl[T]) batchLen(batchData any) int {
+	if provider, ok := p.processor.(batchLenProvider); ok {
+		return provider.batchLen(batchData)
+	}
+	return 0
 }
 
 // resetTimer 安全地将定时器重置为当前的刷新间隔。
@@ -401,20 +433,6 @@ func (p *PipelineImpl[T]) Done() <-chan struct{} {
 	p.runMu.Lock()
 	defer p.runMu.Unlock()
 	return p.runDone
-}
-
-// 计算批次长度（通过反射支持 slice/map）
-func batchLen(batch any) int {
-	if batch == nil {
-		return 0
-	}
-	v := reflect.ValueOf(batch)
-	switch v.Kind() {
-	case reflect.Slice, reflect.Array, reflect.Map, reflect.String:
-		return v.Len()
-	default:
-		return 0
-	}
 }
 
 //	}()
