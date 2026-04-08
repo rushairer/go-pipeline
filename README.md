@@ -1090,10 +1090,10 @@ pipeline := gopipeline.NewDefaultStandardPipeline(
 
 ## 🔥 Advanced Usage
 
-### Dynamic Configuration Adjustment
+### Adaptive Initial Configuration
 
 ```go
-// Dynamically adjust configuration based on system load
+// Compute a better initial configuration from system characteristics
 func createAdaptivePipeline() *gopipeline.StandardPipeline[Task] {
     config := gopipeline.PipelineConfig{
         BufferSize:    getOptimalBufferSize(),
@@ -1183,32 +1183,29 @@ func gracefulShutdown(pipeline *gopipeline.StandardPipeline[Task]) {
     // Create context with timeout
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-    
-    // Stop accepting new data
-    // Close data channel
-    dataChan := pipeline.DataChan()
-    close(dataChan)
-    
-    // Wait for processing to complete
-    done := make(chan struct{})
+
+    // Start one run and consume errors (recommended, not mandatory)
+    done, errs := pipeline.Start(ctx)
     go func() {
-        defer close(done)
-        // Wait for error channel to close, indicating all data has been processed
-        errorChan := pipeline.ErrorChan(10)
         for {
             select {
-            case err, ok := <-errorChan:
+            case err, ok := <-errs:
                 if !ok {
                     return
                 }
                 log.Printf("Processing remaining error: %v", err)
+            case <-done:
+                return
             case <-ctx.Done():
                 return
             }
         }
     }()
-    
-    // Wait for completion or timeout
+
+    // Stop accepting new data: close DataChan to trigger the final flush
+    close(pipeline.DataChan())
+
+    // Wait for this run to finish or time out
     select {
     case <-done:
         log.Println("Pipeline graceful shutdown completed")
@@ -1237,33 +1234,87 @@ Recommendations:
 Validation tests:
 - See `pipeline_memory_behavior_test.go` for examples validating array copy vs. slice/pointer sharing.
 
-## ⚡ Performance Characteristics
+## ⚡ Benchmark Guide
 
-Based on the latest performance benchmark test results:
+Performance depends heavily on Go version, CPU, workload shape, element type, flush logic, and concurrency. Do not treat README numbers as fixed guarantees. The recommended workflow is to run the built-in benchmarks on your own machine with your real flush logic.
 
-### 🚀 Core Performance Metrics
+### How To Run Benchmarks
 
-- **Data Processing Throughput**: ~248 nanoseconds/item (Apple M4)
-- **Memory Efficiency**: 232 bytes/operation, 7 allocations/operation
-- **Batch Processing Optimization**: 5x performance improvement from batch size 1 to 50
-- **Pipeline Overhead**: About 38% slower than direct processing (225.4 vs 162.7 ns/op)
+Common commands:
 
-### 📊 Batch Size Performance Comparison
+```bash
+# Run all benchmarks
+go test ./tests -run '^$' -bench . -benchmem
 
+# Standard pipeline: throughput / async-vs-sync / batch sizes / concurrent producers
+go test ./tests -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)' -benchmem
+
+# Dedup pipeline: throughput / comparison vs standard
+go test ./tests -run '^$' -bench 'BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
-BatchSize1:   740.5 ns/op  (Slowest - frequent flushing)
-BatchSize10:  251.5 ns/op  (Significant improvement)
-BatchSize50:  146.5 ns/op  (Optimal performance) ⭐
-BatchSize100: 163.4 ns/op  (Slight decline)
-BatchSize500: 198.6 ns/op  (Batch too large)
+
+If your environment is sandboxed like the one used for this README, set workspace-local cache directories explicitly:
+
+```bash
+mkdir -p .tmp/go-build .tmp/go-tmp
+GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
+  go test ./tests -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
+
+### Current Reference Results
+
+Test environment:
+
+- Date: 2026-04-08
+- Platform: `darwin/arm64`
+- CPU: Apple M4
+- Command:
+
+```bash
+mkdir -p .tmp/go-build .tmp/go-tmp
+GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
+  go test ./tests -run '^$' -bench 'BenchmarkPipeline(DataProcessing|Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+```
+
+Benchmark summary:
+
+```text
+BenchmarkDeduplicationPipelineThroughput-10              5444530    240.3 ns/op    199 B/op   4 allocs/op
+BenchmarkDeduplicationVsStandard/Deduplication-10        5922850    182.9 ns/op    101 B/op   1 allocs/op
+BenchmarkDeduplicationVsStandard/Standard-10             5866962    184.5 ns/op     91 B/op   2 allocs/op
+
+BenchmarkPipelineDataProcessing-10                       4874593    220.0 ns/op    154 B/op   7 allocs/op
+BenchmarkPipelineThroughput-10                           8503731    139.4 ns/op     74 B/op   1 allocs/op
+BenchmarkPipelineAsyncVsSync/Async-10                    7256854    155.6 ns/op     65 B/op   1 allocs/op
+BenchmarkPipelineAsyncVsSync/Sync-10                     7524166    151.0 ns/op     24 B/op   1 allocs/op
+
+BenchmarkPipelineBatchSizes/BatchSize1-10                1865710    619.6 ns/op    267 B/op  11 allocs/op
+BenchmarkPipelineBatchSizes/BatchSize10-10               4889029    234.3 ns/op    200 B/op   8 allocs/op
+BenchmarkPipelineBatchSizes/BatchSize50-10               5331722    204.2 ns/op    195 B/op   8 allocs/op
+BenchmarkPipelineBatchSizes/BatchSize100-10              6349670    215.5 ns/op    194 B/op   8 allocs/op
+BenchmarkPipelineBatchSizes/BatchSize500-10              5263976    199.3 ns/op    192 B/op   8 allocs/op
+
+BenchmarkPipelineConcurrentProducers/Producers1-10       5988145    200.2 ns/op     97 B/op   3 allocs/op
+BenchmarkPipelineConcurrentProducers/Producers2-10       5216746    223.4 ns/op     97 B/op   3 allocs/op
+BenchmarkPipelineConcurrentProducers/Producers4-10       4161607    284.7 ns/op     97 B/op   3 allocs/op
+BenchmarkPipelineConcurrentProducers/Producers8-10       3367082    340.9 ns/op     97 B/op   3 allocs/op
+```
+
+How to read these numbers:
+
+- The hot path is already very light: standard throughput is about `139.4 ns/op` on this machine, which usually means the main bottleneck is not trivial allocation but channel contention and real flush cost.
+- Sync is currently slightly faster than async: `151.0 ns/op` vs `155.6 ns/op`. That is expected because async adds goroutine scheduling and concurrent flush coordination overhead.
+- Bigger batches are not automatically better: the jump from `1 -> 10` is large, but beyond that the benefit flattens and may reverse due to waiting and cache behavior.
+- Cost rises with producer contention: `1 producer` is about `200.2 ns/op`, while `8 producers` is about `340.9 ns/op`. In high-concurrency workloads, focus on aggregation-point contention before reaching for object pools.
+- Whether dedup is "faster" depends on workload shape: it pays extra map/key cost, and whether it wins depends on how much duplicate suppression offsets that overhead.
 
 ### 💡 Performance Optimization Recommendations
 
-1. **Optimal Batch Size**: Around 50
-2. **Buffer Configuration**: BufferSize >= FlushSize * 2
-3. **Flush Interval**: 50ms balances latency and throughput
-4. **Async Mode**: Recommended for better performance
+1. **Optimal Batch Size**: Start around 50, then validate against your real flush cost.
+2. **Buffer Configuration**: A balanced starting point is `BufferSize >= FlushSize * 2`; for multi-producer or bursty workloads, `4–10x` is usually safer.
+3. **Flush Interval**: 50ms is a balanced default. For lower latency, reduce it, but watch whether small-batch ratio rises sharply.
+4. **Async Mode**: Useful when you want to decouple flush cost from the main loop. If you care about raw hot-path cost, sync mode may be competitive or better.
+5. **Benchmark / pprof before pooling**: current results point more to contention and flush semantics than to "missing a sync.Pool".
 
 ## ⚠️ Important Notes
 
@@ -1271,7 +1322,7 @@ BatchSize500: 198.6 ns/op  (Batch too large)
 
 > **Error Channel Behavior**: Lazily initialized via sync.Once. The first call to `ErrorChan(size int)` decides the buffer size; subsequent calls ignore size. Even if you don't explicitly call it, the pipeline will initialize it on first error send and write errors non-blockingly. If the channel isn't consumed and the buffer fills, subsequent errors are dropped (no blocking or panic).
 
-> **Recommended to Listen to Error Channel**: If you call `ErrorChan(size int)`, it's recommended to listen to the error channel and use select statements to avoid infinite waiting.
+> **Recommended to Listen to Error Channel**: If you call `ErrorChan(size int)`, it's recommended to listen to the error channel and use select statements to avoid infinite waiting; however, it is not mandatory, and not consuming it mainly increases the chance of dropped errors.
 
 > **Channel Management**: v2 version follows the "writer closes" principle, users need to control the closing timing of `DataChan()`.
 
@@ -1280,7 +1331,7 @@ BatchSize500: 198.6 ns/op  (Batch too large)
 ## 🔧 Best Practices
 
 1. **Reasonable Batch Size**: Based on performance tests, recommend using batch size around 50
-2. **⚠️ Must Listen to Error Channel**: Use select statements to avoid blocking, handle errors from batch processing promptly
+2. **Recommended to Listen to Error Channel**: Use select statements to handle batch-processing errors promptly; if you do not consume it, later errors may be dropped once the buffer is full
 3. **Proper Channel Closure**: Use defer close(dataChan) to ensure proper channel closure
 4. **Context Management**: Use context to control pipeline lifecycle
 5. **Deduplication Key Design**: Ensure uniqueness and stability of deduplication keys
@@ -1328,11 +1379,15 @@ cancel2() // End second run
 
 ## 📊 Error Handling
 
-The framework provides comprehensive error handling mechanisms:
+The framework provides comprehensive error handling. The most important and user-visible errors are:
 
-- `ErrContextIsClosed`: Context is closed
-- `ErrPerformLoopError`: Execution loop error
-- `ErrChannelIsClosed`: Channel is closed
+- `ErrContextIsClosed`: the run exited because the context was cancelled
+- `ErrContextDrained`: a best-effort bounded drain flush was performed on cancel, typically joined with `ErrContextIsClosed`
+- `ErrAlreadyRunning`: the same pipeline instance was started concurrently a second time
+
+Additional note:
+- `ErrContextDrained` helps distinguish "cancelled immediately" from "cancelled, but a bounded final drain was attempted first".
+- Some internal error constants are not especially meaningful as primary application-level return values, so this README focuses on the ones most relevant to callers.
 
 ### Error Channel Mechanism
 
@@ -1432,49 +1487,6 @@ go test -bench=BenchmarkPipelineBatchSizes ./...
 # Run memory usage tests
 go test -bench=BenchmarkPipelineMemoryUsage ./...
 ```
-
-## 📈 Performance Benchmarks
-
-Latest benchmark test results on Apple M4 processor:
-
-### Core Performance Tests
-
-```
-BenchmarkPipelineDataProcessing-10                1000    248.2 ns/op    232 B/op    7 allocs/op
-BenchmarkPipelineVsDirectProcessing/Pipeline-10   1000    225.4 ns/op
-BenchmarkPipelineVsDirectProcessing/Direct-10     1000    162.7 ns/op
-BenchmarkPipelineMemoryUsage-10                   1000    232.2 ns/op    510 B/op    9 allocs/op
-```
-
-### Batch Size Efficiency Tests
-
-```
-BenchmarkPipelineBatchSizes/BatchSize1-10         500     740.5 ns/op    500.0 items_processed
-BenchmarkPipelineBatchSizes/BatchSize10-10        500     251.5 ns/op    500.0 items_processed
-BenchmarkPipelineBatchSizes/BatchSize50-10        500     146.5 ns/op    500.0 items_processed ⭐
-BenchmarkPipelineBatchSizes/BatchSize100-10       500     163.4 ns/op    500.0 items_processed
-BenchmarkPipelineBatchSizes/BatchSize500-10       500     198.6 ns/op    500.0 items_processed
-```
-
-### Performance Analysis
-
-- **Optimal Batch Size**: Around 50, 5x performance improvement
-- **Pipeline Overhead**: About 38%, in exchange for better architecture and maintainability
-- **Memory Efficiency**: About 232-510 bytes memory usage per data item
-- **Processing Capacity**: Can process millions of records per second
-
-### Deduplication Pipeline Performance Characteristics
-
-Deduplication pipeline adds the following performance characteristics on top of standard pipeline:
-
-- **Memory Usage**: Uses map structure to store data, slightly higher memory usage than standard pipeline
-- **Processing Latency**: Deduplication logic adds about 10-15% processing time
-- **Key Generation Overhead**: Need to generate unique keys for each data item
-- **Batch Efficiency**: Batch size after deduplication may be smaller than configured FlushSize
-
-**Performance Comparison**:
-- Standard Pipeline: ~225 ns/op
-- Deduplication Pipeline: ~260 ns/op (about 15% overhead increase)
 
 ## ❓ Frequently Asked Questions (FAQ)
 
@@ -1670,13 +1682,13 @@ func(ctx context.Context, batchData []Task) error {
 
 **Symptoms**: Memory usage continuously growing
 **Causes**:
-- Error channel not being consumed
+- High-frequency downstream errors with an unconsumed error channel, leaving you blind to sustained failure
 - Data channel not properly closed
 - Memory leaks in batch processing functions
 
 **Solutions**:
 ```go
-// Ensure error channel is consumed
+// Consuming the error channel is recommended for visibility
 errorChan := pipeline.ErrorChan(10)
 go func() {
     for {
@@ -1702,7 +1714,7 @@ defer close(dataChan)
 **Symptoms**: Processing speed slower than expected
 **Troubleshooting Steps**:
 1. Check if batch size is around 50
-2. Ensure BufferSize >= FlushSize * 2
+2. Check whether BufferSize is at least `2x FlushSize`; for multi-producer or bursty traffic, move toward `4–10x`
 3. Use async mode
 4. Check batch processing function execution time
 
@@ -1710,7 +1722,7 @@ defer close(dataChan)
 ```go
 // Use performance-optimized configuration
 config := gopipeline.PipelineConfig{
-    BufferSize:    100,                   // >= FlushSize * 2
+    BufferSize:    100,                   // balanced default; for bursty/multi-producer workloads, move toward 4–10x FlushSize
     FlushSize:     50,                    // Optimal batch size
     FlushInterval: time.Millisecond * 50, // Balance latency and throughput
 }

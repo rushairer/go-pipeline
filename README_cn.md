@@ -1077,10 +1077,10 @@ pipeline := gopipeline.NewDefaultStandardPipeline(
 
 ## 🔥 高级用法
 
-### 动态配置调整
+### 自适应初始配置
 
 ```go
-// 根据系统负载动态调整配置
+// 根据系统负载计算更合适的初始配置
 func createAdaptivePipeline() *gopipeline.StandardPipeline[Task] {
     config := gopipeline.PipelineConfig{
         BufferSize:    getOptimalBufferSize(),
@@ -1170,32 +1170,29 @@ func gracefulShutdown(pipeline *gopipeline.StandardPipeline[Task]) {
     // 创建带超时的上下文
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-    
-    // 停止接收新数据
-    // 关闭数据通道
-    dataChan := pipeline.DataChan()
-    close(dataChan)
-    
-    // 等待处理完成
-    done := make(chan struct{})
+
+    // 启动一次运行，并消费错误通道（推荐，但不是强制）
+    done, errs := pipeline.Start(ctx)
     go func() {
-        defer close(done)
-        // 等待错误通道关闭，表示所有数据已处理
-        errorChan := pipeline.ErrorChan(10)
         for {
             select {
-            case err, ok := <-errorChan:
+            case err, ok := <-errs:
                 if !ok {
                     return
                 }
                 log.Printf("处理剩余错误: %v", err)
+            case <-done:
+                return
             case <-ctx.Done():
                 return
             }
         }
     }()
-    
-    // 等待完成或超时
+
+    // 停止接收新数据：关闭 DataChan 触发最终 flush
+    close(pipeline.DataChan())
+
+    // 等待本次运行完成或超时
     select {
     case <-done:
         log.Println("管道优雅关闭完成")
@@ -1205,40 +1202,94 @@ func gracefulShutdown(pipeline *gopipeline.StandardPipeline[Task]) {
 }
 ```
 
-## ⚡ 性能特点
+## ⚡ Benchmark 指南
 
-基于最新的性能基准测试结果：
+性能会受 Go 版本、CPU、负载模型、元素类型、flush 逻辑和并发度明显影响。不要把 README 中的数值当成固定承诺；更建议直接在你的机器和真实 flush 逻辑上运行项目自带 benchmark。
 
-### 🚀 核心性能指标
+### 怎么跑 benchmark
 
-- **数据处理吞吐量**: ~248 纳秒/项 (Apple M4)
-- **内存效率**: 232 字节/操作，7 次分配/操作
-- **批处理优化**: 批次大小从 1 到 50，性能提升 5 倍
-- **管道开销**: 比直接处理慢约 38%（225.4 vs 162.7 ns/op）
+常用命令：
 
-### 📊 批次大小性能对比
+```bash
+# 运行全部 benchmark
+go test ./tests -run '^$' -bench . -benchmem
 
-```
-BatchSize1:   740.5 ns/op  (最慢 - 频繁刷新)
-BatchSize10:  251.5 ns/op  (显著改善)
-BatchSize50:  146.5 ns/op  (最优性能) ⭐
-BatchSize100: 163.4 ns/op  (略有下降)
-BatchSize500: 198.6 ns/op  (批次过大)
+# 标准管道：吞吐 / 同步异步 / 批大小 / 多生产者
+go test ./tests -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)' -benchmem
+
+# 去重管道：吞吐 / 与标准管道对比
+go test ./tests -run '^$' -bench 'BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
 
-### 💡 性能优化建议
+如果你的环境和本文一样受限于沙箱，建议显式设置工作区内缓存目录：
 
-1. **最优批次大小**: 50 左右
-2. **缓冲区配置**: BufferSize >= FlushSize * 2
-3. **刷新间隔**: 50ms 平衡延迟和吞吐量
-4. **异步模式**: 推荐使用异步处理获得更好性能
+```bash
+mkdir -p .tmp/go-build .tmp/go-tmp
+GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
+  go test ./tests -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+```
+
+### 当前参考结果
+
+测试环境：
+
+- 日期：2026-04-08
+- 平台：`darwin/arm64`
+- CPU：Apple M4
+- 命令：
+
+```bash
+mkdir -p .tmp/go-build .tmp/go-tmp
+GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
+  go test ./tests -run '^$' -bench 'BenchmarkPipeline(DataProcessing|Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+```
+
+基准摘要：
+
+```text
+BenchmarkDeduplicationPipelineThroughput-10              5444530    240.3 ns/op    199 B/op   4 allocs/op
+BenchmarkDeduplicationVsStandard/Deduplication-10        5922850    182.9 ns/op    101 B/op   1 allocs/op
+BenchmarkDeduplicationVsStandard/Standard-10             5866962    184.5 ns/op     91 B/op   2 allocs/op
+
+BenchmarkPipelineDataProcessing-10                       4874593    220.0 ns/op    154 B/op   7 allocs/op
+BenchmarkPipelineThroughput-10                           8503731    139.4 ns/op     74 B/op   1 allocs/op
+BenchmarkPipelineAsyncVsSync/Async-10                    7256854    155.6 ns/op     65 B/op   1 allocs/op
+BenchmarkPipelineAsyncVsSync/Sync-10                     7524166    151.0 ns/op     24 B/op   1 allocs/op
+
+BenchmarkPipelineBatchSizes/BatchSize1-10                1865710    619.6 ns/op    267 B/op  11 allocs/op
+BenchmarkPipelineBatchSizes/BatchSize10-10               4889029    234.3 ns/op    200 B/op   8 allocs/op
+BenchmarkPipelineBatchSizes/BatchSize50-10               5331722    204.2 ns/op    195 B/op   8 allocs/op
+BenchmarkPipelineBatchSizes/BatchSize100-10              6349670    215.5 ns/op    194 B/op   8 allocs/op
+BenchmarkPipelineBatchSizes/BatchSize500-10              5263976    199.3 ns/op    192 B/op   8 allocs/op
+
+BenchmarkPipelineConcurrentProducers/Producers1-10       5988145    200.2 ns/op     97 B/op   3 allocs/op
+BenchmarkPipelineConcurrentProducers/Producers2-10       5216746    223.4 ns/op     97 B/op   3 allocs/op
+BenchmarkPipelineConcurrentProducers/Producers4-10       4161607    284.7 ns/op     97 B/op   3 allocs/op
+BenchmarkPipelineConcurrentProducers/Producers8-10       3367082    340.9 ns/op     97 B/op   3 allocs/op
+```
+
+如何解读：
+
+- 热路径本身已经很轻：标准吞吐 benchmark 在这台机器上约 `139.4 ns/op`，说明主要矛盾通常不在简单分配，而在 channel 争用和真实 flush 成本。
+- 同步路径当前略快于异步路径：`151.0 ns/op` vs `155.6 ns/op`。这是符合预期的，因为异步模式多了 goroutine 调度与并发 flush 协调成本。
+- 批大小并不是越大越好：`1 -> 10` 的提升很明显，但继续放大到 `100/500` 后收益趋缓，甚至可能因等待和缓存行为出现回摆。
+- 多生产者时成本会随争用上升：从 `1 producer` 的 `200.2 ns/op` 上升到 `8 producers` 的 `340.9 ns/op`，说明高并发下更需要关注聚合点争用，而不是盲目上对象池。
+- 去重模式是否更快取决于负载形状：去重本身有 map/key 成本，是否划算取决于重复率能否抵消这部分开销。
+
+### 性能优化建议
+
+1. **最优批次大小**: 先从 50 左右开始，再用你的真实 flush 成本回测。
+2. **缓冲区配置**: 均衡场景可从 `BufferSize >= FlushSize * 2` 起步；多生产者/突发场景更推荐 `4–10x`。
+3. **刷新间隔**: 50ms 是均衡默认；更低延迟可缩短，但要观察小批次比例是否明显上升。
+4. **异步模式**: 适合把 flush 成本与主循环解耦；若你更在意极致热路径成本，同步模式未必更差。
+5. **先 benchmark/pprof，再谈对象池**: 当前结果更像是争用与 flush 语义问题，而不是“缺一个 `sync.Pool`”。
 
 ## ⚠️ 重要提醒
 
 > **异步无序语义**: 在 AsyncPerform 模式下，flush 回调可能跨批次无序执行（不同 goroutine 并发执行）。请不要依赖跨批次的严格顺序。
 > **错误通道行为**: 通过 sync.Once 懒初始化。第一次调用 `ErrorChan(size int)` 决定缓冲区大小，后续调用忽略 size。即使未显式调用，内部在首次发送错误时也会按默认容量初始化并以非阻塞方式写入；若无人消费且缓冲区填满，后续错误将被丢弃（不阻塞、不 panic）。
 
-> **推荐监听错误通道**: 如果调用了 `ErrorChan(size int)`，建议监听错误通道并使用 select 语句避免无限等待。
+> **推荐监听错误通道**: 如果调用了 `ErrorChan(size int)`，建议监听错误通道并使用 select 语句避免无限等待；但这不是强制要求，不消费只会增加错误被丢弃的概率。
 
 > **通道管理**: v2 版本遵循"谁写谁关闭"原则，用户需要控制 `DataChan()` 的关闭时机。
 
@@ -1248,7 +1299,7 @@ BatchSize500: 198.6 ns/op  (批次过大)
 ## 🔧 最佳实践
 
 1. **合理设置批次大小**: 根据性能测试，推荐使用 50 左右的批次大小
-2. **⚠️ 必须监听错误通道**: 使用 select 语句避免阻塞，及时处理批处理过程中的错误
+2. **建议监听错误通道**: 使用 select 语句及时处理批处理过程中的错误；若不消费，后续错误在缓冲区满时可能被丢弃
 3. **正确关闭数据通道**: 使用 defer close(dataChan) 确保通道正确关闭
 4. **上下文管理**: 使用context控制管道生命周期
 5. **去重键设计**: 确保去重键的唯一性和稳定性
@@ -1296,11 +1347,15 @@ cancel2() // 结束第二次运行
 
 ## 📊 错误处理
 
-框架提供了完善的错误处理机制：
+框架提供了完善的错误处理机制。对调用方最重要、最常见的错误包括：
 
-- `ErrContextIsClosed`: 上下文已关闭
-- `ErrPerformLoopError`: 执行循环错误  
-- `ErrChannelIsClosed`: 通道已关闭
+- `ErrContextIsClosed`: 上下文已取消，运行因此退出
+- `ErrContextDrained`: 取消时已执行过一次“限时收尾”flush（通常与 `ErrContextIsClosed` 通过 `errors.Join` 一起出现）
+- `ErrAlreadyRunning`: 同一实例被并发启动了第二次
+
+补充说明：
+- `ErrContextDrained` 主要用于区分“只是被取消”与“被取消前还做过一次尽力收尾”。
+- 某些内部错误常量不一定会作为主流程返回值暴露给业务方，因此不建议把文档重点放在“罗列全部常量”上。
 
 ### 错误通道机制
 
@@ -1399,49 +1454,6 @@ go test -bench=BenchmarkPipelineBatchSizes ./...
 # 运行内存使用测试
 go test -bench=BenchmarkPipelineMemoryUsage ./...
 ```
-
-## 📈 性能基准
-
-在 Apple M4 处理器上的最新基准测试结果：
-
-### 核心性能测试
-
-```
-BenchmarkPipelineDataProcessing-10                1000    248.2 ns/op    232 B/op    7 allocs/op
-BenchmarkPipelineVsDirectProcessing/Pipeline-10   1000    225.4 ns/op
-BenchmarkPipelineVsDirectProcessing/Direct-10     1000    162.7 ns/op
-BenchmarkPipelineMemoryUsage-10                   1000    232.2 ns/op    510 B/op    9 allocs/op
-```
-
-### 批次大小效率测试
-
-```
-BenchmarkPipelineBatchSizes/BatchSize1-10         500     740.5 ns/op    500.0 items_processed
-BenchmarkPipelineBatchSizes/BatchSize10-10        500     251.5 ns/op    500.0 items_processed
-BenchmarkPipelineBatchSizes/BatchSize50-10        500     146.5 ns/op    500.0 items_processed ⭐
-BenchmarkPipelineBatchSizes/BatchSize100-10       500     163.4 ns/op    500.0 items_processed
-BenchmarkPipelineBatchSizes/BatchSize500-10       500     198.6 ns/op    500.0 items_processed
-```
-
-### 性能分析
-
-- **最优批次大小**: 50 左右，性能提升 5 倍
-- **管道开销**: 约 38%，换取更好的架构和可维护性
-- **内存效率**: 每个数据项约 232-510 字节内存使用
-- **处理能力**: 每秒可处理数百万条记录
-
-### 去重管道性能特点
-
-去重管道在标准管道的基础上增加了以下性能特征：
-
-- **内存使用**: 使用 map 结构存储数据，内存使用略高于标准管道
-- **处理延迟**: 去重逻辑增加约 10-15% 的处理时间
-- **键生成开销**: 需要为每个数据项生成唯一键
-- **批次效率**: 去重后的批次大小可能小于配置的 FlushSize
-
-**性能对比**:
-- 标准管道: ~225 ns/op
-- 去重管道: ~260 ns/op (增加约 15% 开销)
 
 ## ❓ 常见问题 (FAQ)
 
@@ -1636,13 +1648,13 @@ func(ctx context.Context, batchData []Task) error {
 
 **症状**: 内存使用持续增长
 **原因**: 
-- 错误通道未被消费
+- 错误通道长期高频报错且无人消费，导致你无法及时发现下游异常
 - 数据通道未正确关闭
 - 批处理函数中存在内存泄漏
 
 **解决方案**:
 ```go
-// 确保错误通道被消费
+// 推荐消费错误通道，便于观测异常
 errorChan := pipeline.ErrorChan(10)
 go func() {
     for {
@@ -1668,7 +1680,7 @@ defer close(dataChan)
 **症状**: 处理速度慢于预期
 **排查步骤**:
 1. 检查批次大小是否为 50 左右
-2. 确保 BufferSize >= FlushSize * 2
+2. 检查 BufferSize 是否至少达到 `2x FlushSize`；若存在多生产者或突发流量，优先提高到 `4–10x`
 3. 使用异步模式
 4. 检查批处理函数的执行时间
 
@@ -1676,7 +1688,7 @@ defer close(dataChan)
 ```go
 // 使用性能优化的配置
 config := gopipeline.PipelineConfig{
-    BufferSize:    100,                   // >= FlushSize * 2
+    BufferSize:    100,                   // 均衡默认；突发/多生产者场景可增大到 4–10x FlushSize
     FlushSize:     50,                    // 最优批次大小
     FlushInterval: time.Millisecond * 50, // 平衡延迟和吞吐量
 }
