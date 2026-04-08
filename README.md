@@ -119,6 +119,7 @@ graph TD
 Notes:
 - On channel-close path, a final synchronous flush is performed; if `FinalFlushOnCloseTimeout > 0`, it runs under a context with timeout. Your flush function must respect the provided context to exit timely.
 - If configured, async flush concurrency is limited by `MaxConcurrentFlushes` (0 = unlimited).
+- Important: `MaxConcurrentFlushes` is a deliberate hard-backpressure mechanism. When the async flush limit is saturated, the main aggregation loop stops dispatching new flushes and eventually stops consuming `DataChan`, so backpressure propagates upstream on purpose. This design is suitable when protecting downstream systems and reducing request frequency matters more than keeping producers unblocked.
 
 ### Deduplication Pipeline Flow
 
@@ -152,9 +153,16 @@ type PipelineConfig struct {
     DrainOnCancel             bool          // Whether to best-effort flush on cancellation (default false)
     DrainGracePeriod          time.Duration // Max window for the final flush when DrainOnCancel is true
     FinalFlushOnCloseTimeout  time.Duration // Max window for the final flush on channel-close path (0 = disabled; use context.Background)
-    MaxConcurrentFlushes      uint32        // Max concurrent async flushes (0 = unlimited)
+    MaxConcurrentFlushes      uint32        // Max concurrent async flushes; saturation intentionally propagates backpressure upstream (0 = unlimited)
 }
 ```
+
+### Backpressure Semantics
+
+- `BufferSize` controls how much data may queue before producers block.
+- `MaxConcurrentFlushes` is not only a background flush cap. When the cap is reached, the pipeline intentionally slows or stops further intake by blocking the main loop until a flush slot is released.
+- This is a good fit for "protect downstream first" workloads, such as batching writes to databases, message brokers, or external APIs where upstream slowdown is desirable.
+- This is a poor fit for request paths where producer blocking is unacceptable and latency must be protected ahead of downstream request frequency.
 
 ### 🎯 Performance-Optimized Default Values
 
@@ -225,7 +233,8 @@ Formulas:
 
 Validation checklist:
 - Full-batch ratio ≥ 80%
-- Producer stall rate near 0
+- Producer stall rate near 0, if your goal is to keep producers mostly unblocked
+- Producer stall rate intentionally elevated/controlled, if your goal is to push hard backpressure upstream and protect downstream request frequency
 - Stable GC/memory watermark
 - P99/P99.9 E2E latency within SLO
 
@@ -402,7 +411,7 @@ Available configuration methods:
 - `WithDrainOnCancel(enabled bool)` - Enable best-effort final flush on cancel
 - `WithDrainGracePeriod(d time.Duration)` - Set max window for the final flush when DrainOnCancel is enabled
 - `WithFinalFlushOnCloseTimeout(d time.Duration)` - Set timeout for the final flush on channel-close path (0 = disabled)
-- `WithMaxConcurrentFlushes(n uint32)` - Limit async flush concurrency (0 = unlimited)
+- `WithMaxConcurrentFlushes(n uint32)` - Limit async flush concurrency; when saturated, backpressure intentionally propagates to producers (0 = unlimited)
 - `ValidateOrDefault()` - Validate fields and fill safe defaults (constructor also applies defaults)
 
 ### Advanced: Logger and Metrics hooks
@@ -1523,10 +1532,18 @@ Recommended metrics:
 
 Q: Why use initBatchData instead of ResetBatchData when AsyncPerform is enabled?
 A: In async mode, each flush runs in a separate goroutine. If you reuse the same underlying buffer and call ResetBatchData (e.g., slice[:0]) while a previous flush goroutine still holds a reference to that buffer, you risk data corruption or loss due to shared backing storage.
-- AsyncPerform (concurrent flush): detach the current batch container and hand it to the flush goroutine, then create a new container for subsequent accumulation (initBatchData or from a pool). This guarantees no overlap on the same backing array/map.
+- AsyncPerform (concurrent flush): detach the current batch container and hand it to the flush goroutine, then create a new container for subsequent accumulation. This guarantees no overlap on the same backing array/map.
 - SyncPerform (serial flush): it is safe to reuse the same container by ResetBatchData because flush completes in the same goroutine.
-- Recommended practice: for async, prefer “steal and replace” — old container escapes to the flush goroutine; new container starts accumulating immediately. Optionally use a sync.Pool to amortize allocations.
+- Recommended practice: for async, prefer “steal and replace” — old container escapes to the flush goroutine; new container starts accumulating immediately.
+- Be conservative with pooling: only introduce `sync.Pool` after profiling proves allocation pressure is a real bottleneck. In many high-concurrency workloads, pooling slice/map batches can increase memory retention or map-clearing cost and become a negative optimization.
 - Dedup mode: the same rule applies to map-based batches — do not clear the map that a flush goroutine is still reading; hand over the map and create a fresh one.
+
+Q: What does MaxConcurrentFlushes really do?
+A: It is both a concurrency cap and a hard-backpressure control.
+- Below the cap: flushes may proceed asynchronously.
+- At the cap: the main loop blocks until a slot is released, so `DataChan` consumption slows down and producer sends may block.
+- This behavior is intentional for workloads where protecting downstream systems is more important than keeping upstream writers continuously unblocked.
+- If you need producers to stay unblocked under downstream slowness, this library's default hard-backpressure model may not match your workload.
 
 ### Q: How to choose appropriate configuration parameters?
 
@@ -1546,7 +1563,7 @@ You can safely update certain parameters at runtime:
 Notes:
 - FlushSize changes do not retroactively modify an in-progress batch; slice/map will auto-grow as needed
 - FlushInterval updates apply on the next timer reset; a light “nudge” is used to adopt new value quickly
-- MaxConcurrentFlushes is implemented via a dynamic limiter; existing in-flight flushes continue to release to their original slot, avoiding deadlocks
+- MaxConcurrentFlushes is implemented as a hard limiter on async flush dispatch; once saturated, producer-side blocking is an expected form of downstream protection
 
 Quick example:
 p.UpdateFlushSize(128)
@@ -1642,6 +1659,7 @@ func(ctx context.Context, batchData []Task) error {
 - Flush function does not respect ctx: timeouts (FinalFlushOnCloseTimeout) and drain windows are ignored; fix by early return on <-ctx.Done().
 - Error channel not consumed with too-small capacity: may cause frequent drops; either increase capacity, consume in a dedicated goroutine, and/or rely on MetricsHook.ErrorDropped for alerts.
 - BufferSize too small relative to FlushSize: shifts many flushes to timeout path; lower throughput and higher tail latency. Aim BufferSize ≥ 4–10 × FlushSize under bursts.
+- Treating producer blocking as a bug when using MaxConcurrentFlushes for downstream protection: some workloads intentionally rely on this hard backpressure to reduce downstream request frequency.
 - Closing DataChan while planning to reuse pipeline: breaks reuse; use context cancellation for multi-run lifecycle.
 - Starting the same pipeline concurrently: not supported; ErrAlreadyRunning is emitted via errs in Start or returned by Sync/Async.
 - Flush ignores MaxConcurrentFlushes effect by doing extra internal fan-out: avoid spawning unbounded goroutines inside your flush; bound your own parallelism or respect ctx.

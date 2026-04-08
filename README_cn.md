@@ -118,6 +118,7 @@ graph TD
 说明（Notes）:
 - 在“通道关闭”路径下会进行一次最终同步 flush；若 `FinalFlushOnCloseTimeout > 0`，该 flush 会在带超时的上下文下执行。你的 flush 函数必须尊重传入的 ctx，确保能按时退出。
 - 若配置了并发上限，异步 flush 的并发度受 `MaxConcurrentFlushes` 限制（0 表示不限制）。
+- 重要：`MaxConcurrentFlushes` 也是一个有意设计的“硬背压”机制。当异步 flush 并发打满时，主聚合循环会停止继续派发新的 flush，并最终停止继续消费 `DataChan`，从而把背压明确传回上游。这非常适合“优先保护下游、主动降低请求频次”的场景。
 
 
 ### 去重管道流程
@@ -152,9 +153,16 @@ type PipelineConfig struct {
     DrainOnCancel            bool          // 取消时是否进行限时收尾刷新（默认 false：不 flush）
     DrainGracePeriod         time.Duration // 收尾刷新最长时间窗口（启用 DrainOnCancel 时生效）
     FinalFlushOnCloseTimeout time.Duration // 通道关闭路径的最终 flush 超时（0 表示禁用，使用 context.Background）
-    MaxConcurrentFlushes     uint32        // 异步 flush 的最大并发数（0 表示不限制）
+    MaxConcurrentFlushes     uint32        // 异步 flush 的最大并发数；打满时会有意把背压传回上游（0 表示不限制）
 }
 ```
+
+### 背压语义（Backpressure Semantics）
+
+- `BufferSize` 控制在生产者被阻塞前，允许在通道中排队的数据量。
+- `MaxConcurrentFlushes` 不只是“后台 flush 并发上限”。当达到上限时，主循环会阻塞等待可用 slot，因此 intake 会放慢，`DataChan` 写入方也可能被阻塞。
+- 这种设计非常适合“优先保护下游”的工作负载，例如批量写数据库、消息系统或外部 API，此时上游放慢本来就是目标之一。
+- 如果你的业务不能接受生产者阻塞，而是更希望在下游抖动时继续吸收流量，那么这套默认的硬背压模型可能并不适合。
 
 ## 📦 数据类型语义与性能（DataChan 负载）
 
@@ -246,7 +254,8 @@ type PipelineConfig struct {
 
 验证与回归检查：
 - 满批次比例 ≥ 80%（越高越好，说明大多由 FlushSize 触发，而非超时触发）
-- 生产者阻塞率接近 0（避免上游背压）
+- 若目标是尽量不阻塞上游：生产者阻塞率接近 0
+- 若目标是主动把背压推回上游、限制下游请求频次：生产者阻塞率可被有意控制在较高水平
 - GC/内存水位平稳（观察分配与停顿）
 - 端到端 99/99.9 分位延迟可达标
 
@@ -435,7 +444,7 @@ pipeline = gopipeline.NewStandardPipeline(config, flushFunc)
 - `WithDrainOnCancel(enabled bool)` - 启用取消时的限时收尾
 - `WithDrainGracePeriod(d time.Duration)` - 设置收尾刷新最长时间窗口
 - `WithFinalFlushOnCloseTimeout(d time.Duration)` - 设置通道关闭路径的最终 flush 超时（0 表示禁用）
-- `WithMaxConcurrentFlushes(n uint32)` - 限制异步 flush 并发（0 表示不限制）
+- `WithMaxConcurrentFlushes(n uint32)` - 限制异步 flush 并发；打满后会有意向生产者传递背压（0 表示不限制）
 - `ValidateOrDefault()` - 校验并回退到安全默认（构造函数内部也会应用）
 
 ### 🧩 日志与指标钩子（Logger and Metrics hooks）
@@ -1489,10 +1498,18 @@ go func() {
 
 ### Q: 为什么在异步模式下更推荐使用 initBatchData 而不是 ResetBatchData？
 **A:** 在 AsyncPerform 模式下，每次 flush 都在独立 goroutine 中执行。如果复用同一底层缓冲并对批容器做 Reset（如对切片使用 slice[:0]）的同时，上一轮 flush 的 goroutine 仍然持有该容器的引用，就会因为共享底层存储而产生数据错乱或丢失。
-- 异步（并发 flush）：请将“当前批容器”移交给 flush 的 goroutine，并为后续累计“新建一个容器”（initBatchData 或从对象池获取）。这样可确保两个 goroutine 不会共享同一底层数组/映射。
+- 异步（并发 flush）：请将“当前批容器”移交给 flush 的 goroutine，并为后续累计“新建一个容器”。这样可确保两个 goroutine 不会共享同一底层数组/映射。
 - 同步（串行 flush）：flush 在当前 goroutine 内完成，使用 ResetBatchData 复用同一容器是安全的。
-- 实践建议：异步场景优先采用“偷换容器”（steal-and-replace）策略——旧容器短暂逃逸到 flush goroutine，新的容器立即开始累积。可结合 sync.Pool 等手段降低分配抖动。
+- 实践建议：异步场景优先采用“偷换容器”（steal-and-replace）策略——旧容器短暂逃逸到 flush goroutine，新的容器立即开始累积。
+- 对池化保持谨慎：只有在 profiling 明确证明分配压力已成为瓶颈时，才考虑引入 `sync.Pool`。在很多高并发场景下，slice/map 批容器池化会带来更高的内存滞留、map 清理成本，最终形成负优化。
 - 去重模式（map）：同理，不要清空仍被 flush goroutine 读取的 map；应将 map 直接移交，并为新的累计创建一个新 map。
+
+### Q: MaxConcurrentFlushes 的真实语义是什么？
+**A:** 它既是并发上限，也是硬背压控制。
+- 低于上限时：flush 可以异步继续推进。
+- 达到上限时：主循环会阻塞等待 slot 释放，因此 `DataChan` 的消费会变慢，生产者发送也可能被阻塞。
+- 这不是副作用，而是有意设计，适合“宁可让上游停下来，也要保护下游”的工作负载。
+- 如果你的业务不能接受生产者阻塞，那么这个库默认的硬背压模型可能不适合你的链路。
 
 ### Q: 如何选择合适的配置参数？
 
@@ -1512,7 +1529,7 @@ go func() {
 注意事项：
 - FlushSize 的变化不会回溯修改已在构建中的批；slice/map 会在需要时自动扩容
 - FlushInterval 更新在下一次定时重置时生效；组件会轻推一次以尽快采用新值
-- MaxConcurrentFlushes 使用动态限流器实现：在飞 flush 会释放到其获取时对应的通道，避免死锁
+- MaxConcurrentFlushes 实现的是异步 flush 派发的硬上限；一旦打满，生产者侧出现阻塞是预期中的下游保护行为
 
 快速示例：
 p.UpdateFlushSize(128)
@@ -1608,6 +1625,7 @@ func(ctx context.Context, batchData []Task) error {
 - flush 函数不尊重 ctx：超时（FinalFlushOnCloseTimeout）与取消收尾窗口将被忽略；应在 <-ctx.Done() 后尽快返回。
 - 错误通道容量过小且未消费：容易导致大量丢弃；增大容量、在独立 goroutine 中消费，或依赖 MetricsHook.ErrorDropped 触发告警。
 - BufferSize 相对 FlushSize 过小：更多刷新走“超时路径”，吞吐下降且尾延迟上升。突发场景建议 BufferSize ≥ 4–10 × FlushSize。
+- 在使用 MaxConcurrentFlushes 保护下游时，把生产者阻塞误判为 bug：某些场景本来就依赖这种硬背压来主动降低下游请求频次。
 - 计划复用管道却提前关闭 DataChan：会导致无法复用；多次运行应使用 context 控制生命周期。
 - 并发二次启动同一实例：不支持；Start 通过 errs 暴露 ErrAlreadyRunning，Sync/Async 直接返回该错误。
 - flush 内部做了无界并行：削弱 MaxConcurrentFlushes 的上限控制；请限制内部并行度或尊重 ctx。
