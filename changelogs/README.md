@@ -15,6 +15,7 @@
 
 - `RELEASE_NOTES_v2.2.2.md` - v2.2.2 版本发布说明
 - `RELEASE_NOTES_v2.2.3.md` - v2.2.3 版本发布说明
+- `RELEASE_NOTES_v2.2.4.md` - v2.2.4 版本发布说明
 
 ## 推荐
 
