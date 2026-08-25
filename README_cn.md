@@ -36,6 +36,8 @@ go get github.com/rushairer/go-pipeline/v2@latest
 
 项目包含完整的测试套件，确保代码质量和性能：
 
+> 所有 `_test.go` 文件与源码同置于包根目录，遵循 Go 社区惯例，保证 `go test ./... -cover` 和 IDE 测试运行器能正确统计各包覆盖率。`example_test.go` 提供可运行示例，会渲染在 pkg.go.dev 上。
+
 #### 核心功能测试
 - **`pipeline_standard_test.go`**: 标准管道的单元测试，验证基本功能和数据流
 - **`pipeline_deduplication_test.go`**: 去重管道的单元测试，验证去重逻辑和唯一键处理
@@ -43,19 +45,22 @@ go get github.com/rushairer/go-pipeline/v2@latest
 
 #### 高级特性测试
 - **`pipeline_cancel_drain_test.go`**: 取消收尾机制测试，验证 DrainOnCancel 和优雅关闭
-- **`pipeline_concurrency_test.go`**: 并发控制测试，验证 MaxConcurrentFlushes 限制
+- **`pipeline_concurrency_test.go`**: 并发控制测试，验证 MaxConcurrentFlushes 限制和并发 Perform 的 ErrAlreadyRunning
 - **`pipeline_error_chan_test.go`**: 错误通道机制测试，验证懒初始化和非阻塞发送
 - **`pipeline_error_handling_test.go`**: 错误处理流程测试，验证错误传播和处理
 - **`pipeline_final_flush_timeout_test.go`**: 最终刷新超时测试，验证通道关闭时的超时保护
-- **`pipeline_max_concurrent_flushes_test.go`**: 最大并发刷新测试，验证异步刷新的并发限制
+- **`pipeline_config_test.go`**: 配置 API 测试，验证 ValidateOrDefault 默认值和链式 builder 方法
+- **`pipeline_dynamic_tuning_test.go`**: 动态调优测试，验证 UpdateFlushSize/UpdateFlushInterval 运行时生效
 - **`pipeline_hooks_test.go`**: 钩子机制测试，验证 Logger 和 Metrics 钩子功能
 
 #### 性能和压力测试
-- **`pipeline_standard_benchmark_test.go`**: 标准管道的性能基准测试
-- **`pipeline_deduplication_benchmark_test.go`**: 去重管道的性能基准测试  
-- **`pipeline_performance_benchmark_test.go`**: 综合性能基准测试，对比不同批次大小
+- **`pipeline_standard_benchmark_test.go`**: 标准管道的性能基准测试（吞吐、延迟、批次效率、内存、异步 vs 同步、多生产者、管道 vs 直接处理）
+- **`pipeline_deduplication_benchmark_test.go`**: 去重管道的性能基准测试
 - **`pipeline_memory_behavior_test.go`**: 内存语义验证测试，验证不同数据类型的内存行为
 - **`pipeline_race_stress_test.go`**: 竞态条件压力测试，验证并发安全性（需要 -race 标志）
+
+#### 可运行示例
+- **`example_test.go`**: 标准管道和去重管道的可运行示例，会渲染在 pkg.go.dev 上
 
 
 ## 📦 核心组件
@@ -1212,13 +1217,13 @@ func gracefulShutdown(pipeline *gopipeline.StandardPipeline[Task]) {
 
 ```bash
 # 运行全部 benchmark
-go test ./tests -run '^$' -bench . -benchmem
+go test . -run '^$' -bench . -benchmem
 
 # 标准管道：吞吐 / 同步异步 / 批大小 / 多生产者
-go test ./tests -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)' -benchmem
+go test . -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)' -benchmem
 
 # 去重管道：吞吐 / 与标准管道对比
-go test ./tests -run '^$' -bench 'BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+go test . -run '^$' -bench 'BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
 
 如果你的环境和本文一样受限于沙箱，建议显式设置工作区内缓存目录：
@@ -1226,7 +1231,7 @@ go test ./tests -run '^$' -bench 'BenchmarkDeduplication(PipelineThroughput|VsSt
 ```bash
 mkdir -p .tmp/go-build .tmp/go-tmp
 GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
-  go test ./tests -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+  go test . -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
 
 ### 当前参考结果
@@ -1241,7 +1246,7 @@ GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
 ```bash
 mkdir -p .tmp/go-build .tmp/go-tmp
 GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
-  go test ./tests -run '^$' -bench 'BenchmarkPipeline(DataProcessing|Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+  go test . -run '^$' -bench 'BenchmarkPipeline(DataProcessing|Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
 
 基准摘要：

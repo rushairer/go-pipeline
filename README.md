@@ -37,6 +37,8 @@ go get github.com/rushairer/go-pipeline/v2@latest
 
 The project includes a complete test suite to ensure code quality and performance:
 
+> All `_test.go` files live alongside the source code in the package root, following the Go convention. This keeps `go test ./... -cover` and IDE test runners working with correct per-package coverage. `example_test.go` also provides runnable examples rendered on pkg.go.dev.
+
 #### Core Functionality Tests
 - **`pipeline_standard_test.go`**: Unit tests for standard pipeline, verifying basic functionality and data flow
 - **`pipeline_deduplication_test.go`**: Unit tests for deduplication pipeline, verifying deduplication logic and unique key handling
@@ -44,19 +46,22 @@ The project includes a complete test suite to ensure code quality and performanc
 
 #### Advanced Feature Tests
 - **`pipeline_cancel_drain_test.go`**: Cancellation drain mechanism tests, verifying DrainOnCancel and graceful shutdown
-- **`pipeline_concurrency_test.go`**: Concurrency control tests, verifying MaxConcurrentFlushes limits
+- **`pipeline_concurrency_test.go`**: Concurrency control tests, verifying MaxConcurrentFlushes limits and ErrAlreadyRunning on concurrent Perform
 - **`pipeline_error_chan_test.go`**: Error channel mechanism tests, verifying lazy initialization and non-blocking sends
 - **`pipeline_error_handling_test.go`**: Error handling flow tests, verifying error propagation and processing
 - **`pipeline_final_flush_timeout_test.go`**: Final flush timeout tests, verifying timeout protection on channel close
-- **`pipeline_max_concurrent_flushes_test.go`**: Maximum concurrent flushes tests, verifying async flush concurrency limits
+- **`pipeline_config_test.go`**: Config API tests, verifying ValidateOrDefault defaults and chainable builder methods
+- **`pipeline_dynamic_tuning_test.go`**: Dynamic tuning tests, verifying UpdateFlushSize/UpdateFlushInterval take effect at runtime
 - **`pipeline_hooks_test.go`**: Hook mechanism tests, verifying Logger and Metrics hook functionality
 
 #### Performance and Stress Tests
-- **`pipeline_standard_benchmark_test.go`**: Performance benchmark tests for standard pipeline
+- **`pipeline_standard_benchmark_test.go`**: Performance benchmark tests for standard pipeline (throughput, latency, batch efficiency, memory, async vs sync, concurrent producers, pipeline vs direct)
 - **`pipeline_deduplication_benchmark_test.go`**: Performance benchmark tests for deduplication pipeline
-- **`pipeline_performance_benchmark_test.go`**: Comprehensive performance benchmark tests comparing different batch sizes
 - **`pipeline_memory_behavior_test.go`**: Memory semantics validation tests, verifying memory behavior of different data types
 - **`pipeline_race_stress_test.go`**: Race condition stress tests, verifying concurrency safety (requires -race flag)
+
+#### Runnable Examples
+- **`example_test.go`**: Runnable examples for standard and deduplication pipelines, rendered on pkg.go.dev
 
 
 ## 📦 Core Components
@@ -1244,13 +1249,13 @@ Common commands:
 
 ```bash
 # Run all benchmarks
-go test ./tests -run '^$' -bench . -benchmem
+go test . -run '^$' -bench . -benchmem
 
 # Standard pipeline: throughput / async-vs-sync / batch sizes / concurrent producers
-go test ./tests -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)' -benchmem
+go test . -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)' -benchmem
 
 # Dedup pipeline: throughput / comparison vs standard
-go test ./tests -run '^$' -bench 'BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+go test . -run '^$' -bench 'BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
 
 If your environment is sandboxed like the one used for this README, set workspace-local cache directories explicitly:
@@ -1258,7 +1263,7 @@ If your environment is sandboxed like the one used for this README, set workspac
 ```bash
 mkdir -p .tmp/go-build .tmp/go-tmp
 GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
-  go test ./tests -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+  go test . -run '^$' -bench 'BenchmarkPipeline(Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers|DataProcessing)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
 
 ### Current Reference Results
@@ -1273,7 +1278,7 @@ Test environment:
 ```bash
 mkdir -p .tmp/go-build .tmp/go-tmp
 GOCACHE=$(pwd)/.tmp/go-build GOTMPDIR=$(pwd)/.tmp/go-tmp \
-  go test ./tests -run '^$' -bench 'BenchmarkPipeline(DataProcessing|Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
+  go test . -run '^$' -bench 'BenchmarkPipeline(DataProcessing|Throughput|AsyncVsSync|BatchSizes|ConcurrentProducers)|BenchmarkDeduplication(PipelineThroughput|VsStandard)' -benchmem
 ```
 
 Benchmark summary:

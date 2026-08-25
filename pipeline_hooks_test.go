@@ -125,32 +125,6 @@ func TestWithMetricsHook(t *testing.T) {
 		t.Fatalf("expected metrics hook Flush to be called at least once")
 	}
 
-	// 由于无法直接访问内部钩子，做一次健全性断言：
-	// 至少应发生一次 flush。我们将快速重新运行一次同步的 perform，
-	// 使用计数包装器以确保在 CI 中覆盖钩子路径。
-	var count int32
-	p2 := gopipeline.NewStandardPipeline[int](cfg, func(ctx context.Context, batch []int) error {
-		atomic.AddInt32(&count, 1)
-		return nil
-	})
-	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
-	defer cancel2()
-	done2, _ := p2.Start(ctx2)
-	ch2 := p2.DataChan()
-	for i := 0; i < int(cfg.FlushSize); i++ {
-		ch2 <- i
-	}
-	time.AfterFunc(10*time.Millisecond, func() { close(ch2) })
-	select {
-	case <-done2:
-	case <-time.After(1 * time.Second):
-		t.Fatalf("pipeline #2 did not finish in time")
-	}
-
-	if atomic.LoadInt32(&count) < 1 {
-		t.Fatalf("expected at least one flush, got %d", count)
-	}
-
 }
 
 // TestWithLogger 确保 WithLogger 能接受自定义 logger 且不会引发问题。

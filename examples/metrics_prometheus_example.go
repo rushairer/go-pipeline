@@ -104,22 +104,22 @@ func NewPromMetrics(reg prometheus.Registerer) *PromMetrics {
 	}
 }
 
-// Flush implements MetricsHook.Flush: called once per flush (success or failure).
+// Flush implements MetricsHook.Flush: called once per flush, both on success and on failure.
+// The interface does not expose the result, so only neutral stats (batch size) are recorded
+// here. Failure counting happens in Error(); precise latency with an ok/fail result label and
+// the success counter require wrapping the flush handler with flushWrapper (see below).
 func (m *PromMetrics) Flush(items int, d time.Duration) {
-	// Record latency with a result label. For simplicity, infer result by duration & prior Error() call is not visible here.
-	// Best practice: record latency in both paths; here we default to "ok" and rely on Error() to also observe "fail".
-	m.flushLatency.WithLabelValues("ok").Observe(d.Seconds())
+	_ = d // duration is meaningful only when paired with a result; recorded in flushWrapper
 	m.flushSize.Observe(float64(items))
-	m.flushSuccess.Inc()
 }
 
-// Error implements MetricsHook.Error: count failures; you may also tag error type if stable (avoid high-cardinality values).
+// Error implements MetricsHook.Error: called by the pipeline when the flush handler returns
+// an error. This is the failure counter; you may also tag error type if stable (avoid
+// high-cardinality values).
 func (m *PromMetrics) Error(err error) {
 	m.errorCount.Inc()
-	// Also increment failure counter and latency with "fail" label in a best-effort manner if paired in your flush wrapper.
 	m.flushFailure.Inc()
-	// Optional: error-class labeling
-	_ = err
+	_ = err // optional: error-class labeling
 }
 
 // ErrorDropped implements MetricsHook.ErrorDropped: count dropped errors when error channel saturates.
@@ -135,12 +135,13 @@ func (m *PromMetrics) DrainFlushTimeout() { m.drainFlushTO.Inc() }
 
 // Example wiring with Prometheus HTTP exporter.
 func Example_prometheusWiring() {
-	// Build pipeline and attach metrics
-	p := gopipeline.NewDefaultStandardPipeline(func(ctx context.Context, batch []int) error {
+	// Build pipeline and attach metrics. Wrap the flush handler with flushWrapper so
+	// that success counting and ok/fail latency are recorded precisely.
+	m := NewPromMetrics(nil)
+	p := gopipeline.NewDefaultStandardPipeline(flushWrapper(m, func(ctx context.Context, batch []int) error {
 		// your flush logic
 		return nil
-	})
-	m := NewPromMetrics(nil)
+	}))
 	p.WithMetrics(m)
 
 	// Expose /metrics
@@ -169,7 +170,9 @@ func Example_prometheusWiring() {
 	// Output:
 }
 
-// Optional: a wrapper to correlate success/failure latency recording explicitly.
+// flushWrapper wraps your flush handler to record precise per-result latency and the
+// success counter. Failure is already counted by MetricsHook.Error(), so the failure
+// branch must NOT increment flushFailure again (that would double-count failed flushes).
 func flushWrapper(m *PromMetrics, fn func(ctx context.Context, batch []int) error) func(ctx context.Context, batch []int) error {
 	return func(ctx context.Context, batch []int) error {
 		start := time.Now()
@@ -177,7 +180,6 @@ func flushWrapper(m *PromMetrics, fn func(ctx context.Context, batch []int) erro
 		elapsed := time.Since(start)
 		if err != nil {
 			m.flushLatency.WithLabelValues("fail").Observe(elapsed.Seconds())
-			m.flushFailure.Inc()
 			return err
 		}
 		m.flushLatency.WithLabelValues("ok").Observe(elapsed.Seconds())
@@ -207,20 +209,38 @@ func sampleErrorChanSaturation(errs <-chan error) {
 }
 
 // Example showing how to surface ErrAlreadyRunning via errs in Start.
-func exampleStartAlreadyRunning(p gopipeline.Pipeline[int]) {
+// Start (and thus ErrAlreadyRunning) lives on the concrete *StandardPipeline type, not on
+// the Pipeline interface. ErrAlreadyRunning is delivered asynchronously (a second Start
+// triggers a fire-and-forget AsyncPerform that reports it), so a single short select can
+// miss it: poll until observed or timeout. Both Start calls share the same internal error
+// channel.
+func exampleStartAlreadyRunning(p *gopipeline.StandardPipeline[int]) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done1, errs1 := p.Start(ctx)
-	_, errs2 := p.Start(ctx)
-	var got error
-	select {
-	case got = <-errs1:
-	case got = <-errs2:
-	case <-time.After(200 * time.Millisecond):
+	_, errs2 := p.Start(ctx) // second Start: ErrAlreadyRunning arrives asynchronously
+
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case err := <-errs1:
+			if errors.Is(err, gopipeline.ErrAlreadyRunning) {
+				cancel()
+				<-done1
+				return
+			}
+		case err := <-errs2:
+			if errors.Is(err, gopipeline.ErrAlreadyRunning) {
+				cancel()
+				<-done1
+				return
+			}
+		case <-timer.C:
+			log.Printf("warning: did not observe ErrAlreadyRunning within timeout")
+			return
+		}
 	}
-	_ = got // expect errors.Is(got, gopipeline.ErrAlreadyRunning)
-	cancel()
-	<-done1
 }
 
 // avoid unused warnings

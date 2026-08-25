@@ -2,12 +2,54 @@ package gopipeline_test
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
+
+// TestErrAlreadyRunning 确认同一实例并发启动多次 Perform 返回 ErrAlreadyRunning
+func TestErrAlreadyRunning(t *testing.T) {
+	cfg := gopipeline.NewPipelineConfig().
+		WithBufferSize(64).
+		WithFlushSize(16).
+		WithFlushInterval(50 * time.Millisecond).
+		WithMaxConcurrentFlushes(1)
+
+	p := gopipeline.NewStandardPipeline(cfg, func(ctx context.Context, batch []int) error {
+		// 轻量处理
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(5 * time.Millisecond):
+			return nil
+		}
+	})
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel1()
+
+	// 首次启动（异步）
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_ = p.AsyncPerform(ctx1)
+	}()
+
+	<-started
+
+	// 立即尝试再次启动（同步或异步均应返回 ErrAlreadyRunning）
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel2()
+
+	err := p.SyncPerform(ctx2)
+	if !errors.Is(err, gopipeline.ErrAlreadyRunning) {
+		t.Fatalf("expected ErrAlreadyRunning, got: %v", err)
+	}
+}
 
 // TestMaxConcurrentFlushes verifies that asynchronous flush concurrency
 // is capped by the configured MaxConcurrentFlushes. It observes the maximum
@@ -24,7 +66,7 @@ func TestMaxConcurrentFlushes(t *testing.T) {
 
 	for _, tc := range cases {
 		tc := tc
-		t.Run(("max=" + itoa(tc.maxConc)), func(t *testing.T) {
+		t.Run("max="+strconv.Itoa(int(tc.maxConc)), func(t *testing.T) {
 			var current int32
 			var maxObserved int32
 
@@ -117,36 +159,4 @@ func TestMaxConcurrentFlushes(t *testing.T) {
 			}
 		})
 	}
-}
-
-// itoa for small uint32, to avoid importing strconv in tests
-func itoa(u uint32) string {
-	// fast path for small values used here (1,2,...)
-	switch u {
-	case 0:
-		return "0"
-	case 1:
-		return "1"
-	case 2:
-		return "2"
-	case 3:
-		return "3"
-	case 4:
-		return "4"
-	case 5:
-		return "5"
-	}
-	// fallback (rarely hit in this test)
-	n := int(u)
-	if n == 0 {
-		return "0"
-	}
-	buf := [10]byte{}
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + (n % 10))
-		n /= 10
-	}
-	return string(buf[i:])
 }

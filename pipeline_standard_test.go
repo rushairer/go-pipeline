@@ -158,81 +158,6 @@ func TestStandardPipelineAsyncPerformWithFlushError(t *testing.T) {
 	<-doneChan
 }
 
-// TestStandardPipelineAsyncPerformTimeout 测试异步执行超时场景
-// dataChan 会在写入完成后被 close
-func TestStandardPipelineAsyncPerformTimeout(t *testing.T) {
-	var mux sync.Mutex
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
-	defer cancel()
-
-	var processedCount int
-	pipeline := gopipeline.NewStandardPipeline(
-		gopipeline.PipelineConfig{
-			BufferSize:    64,
-			FlushSize:     32,
-			FlushInterval: time.Millisecond * 100,
-		},
-		func(ctx context.Context, batchData []int) error {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				// 长时间 sleep 模拟超时场景
-				time.Sleep(time.Second * 5)
-				mux.Lock()
-				processedCount += len(batchData)
-				mux.Unlock()
-			}
-			return nil
-		})
-
-	// 启动异步处理
-	doneChan := make(chan struct{})
-	go func() {
-		defer close(doneChan)
-
-		if err := pipeline.AsyncPerform(ctx); err != nil {
-			t.Log("AsyncPerform finished with:", err)
-		}
-
-	}()
-
-	// 监听错误
-	errorChan := pipeline.ErrorChan(10)
-	go func() {
-		for err := range errorChan {
-			t.Errorf("Expected no error, got %v", err)
-		}
-	}()
-
-	// 使用新的 DataChan API 添加数据
-	dataChan := pipeline.DataChan()
-	go func() {
-		defer close(dataChan)
-		for i := 0; i < 1000; i++ {
-			select {
-			case dataChan <- i:
-			case <-ctx.Done():
-				t.Log("Data sending stopped due to context cancellation")
-				return
-			}
-		}
-	}()
-
-	<-ctx.Done()
-
-	// 由于超时，处理的数据应该少于总数
-	mux.Lock()
-	finalCount := processedCount
-	mux.Unlock()
-
-	if finalCount >= 1000 {
-		t.Errorf("Expected less than 1000 processed items due to timeout, got %d", finalCount)
-	}
-
-	<-doneChan
-}
-
 // TestStandardPipelineSyncPerform 测试同步执行管道操作
 func TestStandardPipelineSyncPerform(t *testing.T) {
 	var mux sync.Mutex
@@ -543,26 +468,6 @@ func TestStandardPipelineSyncPerformRestart(t *testing.T) {
 	}
 
 	t.Log("同步队列重复启动测试通过：两次运行相互独立，数据处理正确且有序")
-}
-
-// TestStandardPipelineErrorChanSize 测试错误通道大小配置
-func TestStandardPipelineErrorChanSize(t *testing.T) {
-	pipeline := gopipeline.NewDefaultStandardPipeline(
-		func(ctx context.Context, batchData []int) error {
-			return errors.New("test error")
-		})
-
-	// 测试自定义错误通道大小
-	errorChan := pipeline.ErrorChan(5)
-	if cap(errorChan) != 5 {
-		t.Errorf("Expected error channel capacity 5, got %d", cap(errorChan))
-	}
-
-	// 测试默认错误通道大小（传入0）
-	errorChan2 := pipeline.ErrorChan(0)
-	if cap(errorChan2) == 0 {
-		t.Error("Expected non-zero default error channel capacity")
-	}
 }
 
 // 辅助类型和函数

@@ -14,6 +14,9 @@ import (
 // - 数组类型 [N]T 作为通道元素会整体拷贝（值拷贝），因此可能有内存/时间开销
 // - 切片类型 []T 作为通道元素仅拷贝切片头（ptr/len/cap），底层数据不拷贝，若生产者复用/修改底层缓冲会被下游看到
 // - 指针类型 *T 仅拷贝指针本身，不会重复拷贝指针指向的内存，但存在共享和数据竞争风险
+//
+// 三个子测试统一使用 SyncPerform：flush 与源数据修改在同一 goroutine 内严格串行，
+// 既能精确验证"共享/拷贝"语义，又避免测试自身制造数据竞争（-race 下不会误报）。
 func TestPipeline_ArrayVsSliceMemoryCopy(t *testing.T) {
 	// 使用关闭数据通道触发最终 flush 的模式，便于在发送后修改源缓冲再触发 flush
 	// FlushSize 设大一点，避免发送时立即触发 flush
@@ -38,7 +41,6 @@ func TestPipeline_ArrayVsSliceMemoryCopy(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		go func() { _ = p.AsyncPerform(ctx) }()
 
 		ch := p.DataChan()
 		// 源缓冲及其切片视图
@@ -53,13 +55,10 @@ func TestPipeline_ArrayVsSliceMemoryCopy(t *testing.T) {
 		// 发送后修改底层缓冲（若共享则下游会观察到修改后的值）
 		src[0] = 99
 		src[7] = 77
-		// 触发最终 flush
+		// 触发最终 flush（SyncPerform 同步执行，修改与读取严格串行）
 		close(ch)
-
-		// 等待一点时间让最终 flush 完成
-		select {
-		case <-p.Done():
-		case <-time.After(500 * time.Millisecond):
+		if err := p.SyncPerform(ctx); err != nil {
+			t.Fatalf("SyncPerform failed: %v", err)
 		}
 
 		if len(seen) != 1 {
@@ -84,7 +83,6 @@ func TestPipeline_ArrayVsSliceMemoryCopy(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		go func() { _ = p.AsyncPerform(ctx) }()
 
 		ch := p.DataChan()
 		// 源缓冲
@@ -102,11 +100,8 @@ func TestPipeline_ArrayVsSliceMemoryCopy(t *testing.T) {
 		src[7] = 231
 		// 触发最终 flush
 		close(ch)
-
-		// 等待完成
-		select {
-		case <-p.Done():
-		case <-time.After(500 * time.Millisecond):
+		if err := p.SyncPerform(ctx); err != nil {
+			t.Fatalf("SyncPerform failed: %v", err)
 		}
 
 		if len(seen) != 1 {
@@ -141,7 +136,6 @@ func TestPipeline_PointerNoDuplicateMemoryButShared(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	go func() { _ = p.AsyncPerform(ctx) }()
 
 	ch := p.DataChan()
 	// 创建一个较大的对象（这里用小尺寸以加快测试）
@@ -155,13 +149,10 @@ func TestPipeline_PointerNoDuplicateMemoryButShared(t *testing.T) {
 	// 发送后修改指针指向的数据（若共享则下游会看到修改）
 	large.data[0] = 42
 	large.data[7] = 24
-	// 触发最终 flush
+	// 触发最终 flush（SyncPerform 同步执行，修改与读取严格串行）
 	close(ch)
-
-	// 等待完成
-	select {
-	case <-p.Done():
-	case <-time.After(500 * time.Millisecond):
+	if err := p.SyncPerform(ctx); err != nil {
+		t.Fatalf("SyncPerform failed: %v", err)
 	}
 
 	if len(seen) != 1 {

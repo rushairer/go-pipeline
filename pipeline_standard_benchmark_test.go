@@ -11,7 +11,7 @@ import (
 	gopipeline "github.com/rushairer/go-pipeline/v2"
 )
 
-type BenchmarkBenchmarkTestData struct {
+type BenchmarkTestData struct {
 	Name    string
 	Address string
 	Age     uint
@@ -361,4 +361,63 @@ func BenchmarkPipelineConcurrentProducers(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkPipelineVsDirectProcessing 比较管道处理和直接处理的性能
+func BenchmarkPipelineVsDirectProcessing(b *testing.B) {
+	b.Run("Pipeline", func(b *testing.B) {
+		var processedCount int64
+
+		pipeline := gopipeline.NewStandardPipeline(
+			gopipeline.PipelineConfig{
+				BufferSize:    1000,
+				FlushSize:     100,
+				FlushInterval: time.Millisecond * 5,
+			},
+			func(ctx context.Context, batchData []BenchmarkTestData) error {
+				for _, data := range batchData {
+					_ = fmt.Sprintf("%s-%s-%d", data.Name, data.Address, data.Age)
+				}
+				atomic.AddInt64(&processedCount, int64(len(batchData)))
+				return nil
+			})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		go pipeline.AsyncPerform(ctx)
+		dataChan := pipeline.DataChan()
+
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			dataChan <- BenchmarkTestData{
+				Name:    fmt.Sprintf("User%d", i%1000),
+				Address: fmt.Sprintf("Address%d", i%500),
+				Age:     uint(20 + i%50),
+			}
+		}
+
+		b.StopTimer()
+		close(dataChan)
+
+		// 等待处理完成
+		deadline := time.Now().Add(time.Second * 10)
+		for atomic.LoadInt64(&processedCount) < int64(b.N) && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond * 10)
+		}
+	})
+
+	b.Run("Direct", func(b *testing.B) {
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			data := BenchmarkTestData{
+				Name:    fmt.Sprintf("User%d", i%1000),
+				Address: fmt.Sprintf("Address%d", i%500),
+				Age:     uint(20 + i%50),
+			}
+			_ = fmt.Sprintf("%s-%s-%d", data.Name, data.Address, data.Age)
+		}
+	})
 }
