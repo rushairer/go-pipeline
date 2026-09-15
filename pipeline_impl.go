@@ -104,12 +104,17 @@ func (p *PipelineImpl[T]) DataChan() chan<- T {
 	return p.dataChan
 }
 
-// AsyncPerform 异步执行管道操作
+// AsyncPerform 运行采用并发 flush 的批处理循环。
+//
+// AsyncPerform 本身不会自动在新的 goroutine 中启动；它会占用调用它的 goroutine，
+// 直到当前 run loop 结束。这里的“Async”指满足 flush 条件的批次可以派发到独立
+// goroutine 并发执行，后续批次无需串行等待前一批 flush 完成。
+//
+// 需要非阻塞启动时使用 Start(ctx)。flush 返回的业务错误通过 ErrorChan 进行
+// non-blocking / best-effort 观测；本方法主要返回 run loop 生命周期错误。
 // 参数:
 //   - ctx: 上下文对象，用于控制操作的生命周期
-//
-// 运行时产生的错误将通过 ErrorChan 下发（需显式调用 ErrorChan 接收）
-// 返回值: 如果执行过程中发生错误则返回error
+// 返回值: run loop 生命周期错误
 func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context) error {
 	err := p.performLoop(ctx, true)
 	return err
@@ -427,8 +432,14 @@ func (p *PipelineImpl[T]) WithMetrics(h MetricsHook) *PipelineImpl[T] {
 	return p
 }
 
-// Done 返回最近一次调用 Perform（Sync/Async）的完成信号通道
-// 注意：该通道在每次 Perform 启动时都会被替换；并发多次启动时语义未定义
+// Done 返回当前 pipeline run loop 的完成信号通道。
+//
+// 对 AsyncPerform，Done 关闭只表示 run loop 已结束；它有意不作为此前已经派发的
+// async flush goroutine 的全局 join barrier。需要“所有副作用都已持久化完成”的
+// 强完成语义时，应由 processor 或上层 runtime 显式提供自己的 completion barrier。
+//
+// 通过 Start(ctx) 启动时，优先使用 Start 返回的 done，它与该次运行绑定。
+// Done() 主要用于运行已经启动后，从其他位置获取当前运行的完成信号。
 func (p *PipelineImpl[T]) Done() <-chan struct{} {
 	p.runMu.Lock()
 	defer p.runMu.Unlock()
@@ -440,7 +451,7 @@ func (p *PipelineImpl[T]) Done() <-chan struct{} {
 //
 // 异常处理说明:
 //   - 刷新过程中的错误通过 safeErrorSend 非阻塞写入本通道，缓冲满时会丢弃该错误以避免阻塞
-//   - 通道由管道内部创建且仅初始化一次，不建议外部关闭；收尾由 context/WaitGroup 协调
+//   - 通道由管道内部创建且仅初始化一次，不建议外部关闭；其生命周期不提供 durable failure completion 语义
 func (p *PipelineImpl[T]) ErrorChan(size int) <-chan error {
 	p.errOnce.Do(func() {
 		n := size
@@ -452,12 +463,18 @@ func (p *PipelineImpl[T]) ErrorChan(size int) <-chan error {
 	return p.errorChan
 }
 
-// Start 启动异步执行，返回本次运行的完成信号（done）和错误通道（errs）。
+// Start 非阻塞启动采用并发 flush 语义的 pipeline run，并返回 done 和 errs。
+//
+// Start 是 AsyncPerform 的 goroutine 封装：调用本身立即返回，但不会改变底层的
+// completion semantics。done 表示本次 pipeline run loop 已结束，并不承诺此前已经
+// dispatch 的所有 async flush 都已 join；errs 与 ErrorChan 一样是 non-blocking /
+// best-effort 错误观测通道，不是 durable failure queue。
+//
 // 行为与约定：
-//   - 若管道“已在运行”：直接复用并返回“当前正在运行”的 done，不新建/不覆盖；同时异步触发一次 AsyncPerform，
+//   - 若管道“已在运行”：直接复用并返回当前运行的 done，不新建/不覆盖；同时异步触发一次 AsyncPerform，
 //     仅用于将 ErrAlreadyRunning 上报到 errs（不会影响现有运行）。
-//   - 若管道“未在运行”：仅当 runDone 为空时创建新的 done，否则复用现有 done；随后启动 AsyncPerform。
-//   - 提示：保持测试覆盖，尤其是“并发二次启动（ErrAlreadyRunning）”与“Done 关闭时序”的断言，确保语义稳定。
+//   - 若管道“未在运行”：仅当 runDone 为空时创建新的 done，否则复用现有 done；随后在 goroutine 中启动 AsyncPerform。
+//   - 需要严格的“所有副作用已完成”语义时，由 processor 或上层 runtime 自行提供 completion barrier。
 func (p *PipelineImpl[T]) Start(ctx context.Context) (<-chan struct{}, <-chan error) {
 	errs := p.ErrorChan(0)
 
