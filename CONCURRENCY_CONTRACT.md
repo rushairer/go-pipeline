@@ -88,6 +88,18 @@ This means the desired contract is not "nothing ever blocks". It is:
 
 > Do not introduce unnecessary serialization between independent batches; when capacity is exhausted, apply explicit and bounded backpressure.
 
+## Contract regression tests
+
+`pipeline_concurrency_contract_test.go` is the executable regression suite for the semantics in this document. It intentionally locks three performance-sensitive guarantees:
+
+1. independent full batches can enter asynchronous flush concurrently while configured concurrency capacity remains available;
+2. `Done` signals run-loop completion and is not silently strengthened into a global join barrier for already-dispatched async flushes;
+3. a saturated `ErrorChan` does not block the processing hot path, and dropped error observations are surfaced through `MetricsHook.ErrorDropped()`.
+
+These tests are deliberately contract tests rather than implementation-detail tests. A future change that makes one of them fail should trigger an explicit design review of this document instead of being treated as a routine refactor.
+
+In particular, do not change the `Done` test to require all async flushes to complete unless the project intentionally decides to trade additional steady-state completion bookkeeping for stronger lifecycle semantics.
+
 ## Non-goals
 
 The core package is not intended to be a:
@@ -167,6 +179,18 @@ ErrorChan
 所以正确目标不是“任何地方都不阻塞”，而是：
 
 > 独立批次之间不做不必要的串行等待；达到容量边界时，通过明确、有限的背压保护系统。
+
+## 契约回归测试
+
+`pipeline_concurrency_contract_test.go` 是本文语义对应的可执行回归测试，专门锁定三个与性能直接相关的保证：
+
+1. 在并发容量未耗尽时，独立满批次可以同时进入异步 flush，而不会被意外串行化；
+2. `Done` 表示 run loop 完成，不应在普通重构中被悄悄加强成“所有已派发 async flush 全部 join”的全局 barrier；
+3. `ErrorChan` 饱和时不会阻塞数据处理热路径，错误观测丢弃通过 `MetricsHook.ErrorDropped()` 暴露。
+
+这些测试是 contract tests，而不是对内部实现细节的偶然断言。未来如果某项测试失败，应先重新审视本文的设计契约，而不是把它当作普通重构导致的测试更新。
+
+尤其不要把 `Done` 测试改成“必须等待所有 async flush 完成”，除非项目明确决定用额外的 steady-state completion bookkeeping 换取更强的生命周期语义。
 
 ## 非目标
 
