@@ -151,5 +151,3 @@ func TestErrorChanWithoutCall(t *testing.T) {
 
 	<-doneChan
 }
-
-

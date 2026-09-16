@@ -44,8 +44,8 @@ func TestUpdateFlushSize_TakesEffect(t *testing.T) {
 	p := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
 			BufferSize:    256,
-			FlushSize:     1000,       // 初始很大，避免被旧大小触发
-			FlushInterval: time.Hour,  // 初始很大，避免被定时器触发
+			FlushSize:     1000,      // 初始很大，避免被旧大小触发
+			FlushInterval: time.Hour, // 初始很大，避免被定时器触发
 		},
 		func(ctx context.Context, batch []int) error {
 			select {
@@ -140,8 +140,8 @@ func TestUpdateFlushInterval_TakesEffect(t *testing.T) {
 	p := gopipeline.NewStandardPipeline(
 		gopipeline.PipelineConfig{
 			BufferSize:    256,
-			FlushSize:     1000,       // 很大，确保不因批量满而触发
-			FlushInterval: time.Hour,  // 初始很大，确保不因旧定时器触发
+			FlushSize:     1000,      // 很大，确保不因批量满而触发
+			FlushInterval: time.Hour, // 初始很大，确保不因旧定时器触发
 		},
 		func(ctx context.Context, batch []int) error {
 			select {

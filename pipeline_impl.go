@@ -114,6 +114,7 @@ func (p *PipelineImpl[T]) DataChan() chan<- T {
 // non-blocking / best-effort 观测；本方法主要返回 run loop 生命周期错误。
 // 参数:
 //   - ctx: 上下文对象，用于控制操作的生命周期
+//
 // 返回值: run loop 生命周期错误
 func (p *PipelineImpl[T]) AsyncPerform(ctx context.Context) error {
 	err := p.performLoop(ctx, true)
